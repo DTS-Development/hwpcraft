@@ -1206,9 +1206,13 @@ fn load_bin_data_content_lenient(
                         }
                     }
                 } else {
-                    match cfb_reader::decompress_stream(&data) {
-                        Ok(d) => d,
-                        Err(_) => data,
+                    match decompress_plain_bin_data(
+                        &storage_name,
+                        data,
+                        crate::model::bin_data::MAX_BIN_DATA_BYTES,
+                    ) {
+                        Some(d) => d,
+                        None => continue,
                     }
                 };
 
@@ -1854,6 +1858,26 @@ impl std::fmt::Debug for Hwp5BinResolver {
     }
 }
 
+/// 비암호 HWP5 BinData 스트림을 압축 해제한다. 압축 해제 결과는 `max_bytes`를 넘을 수 없다.
+///
+/// 압축 해제에 실패하면(비압축 데이터) 원본을 그대로 돌려준다(기존 동작).
+/// 상한을 넘으면 `None`을 돌려주고 경고를 남긴다 — 호출자는 해당 항목을 건너뛴다
+/// (렌더·질의 경로의 bounded 로드와 같은 "누락 이미지" 처리). 작은 입력이 수 GB로 풀리는
+/// 압축 폭탄 HWP가 메모리를 고갈시키지 못하게 하는 방어선이다.
+fn decompress_plain_bin_data(key: &str, raw: Vec<u8>, max_bytes: usize) -> Option<Vec<u8>> {
+    match cfb_reader::decompress_stream_limited(&raw, max_bytes) {
+        Ok(data) => Some(data),
+        Err(cfb_reader::CfbError::LimitExceeded(limit)) => {
+            eprintln!(
+                "경고: BinData '{}' 압축 해제 크기가 상한({} 바이트)을 넘어 건너뜀",
+                key, limit
+            );
+            None
+        }
+        Err(_) => Some(raw),
+    }
+}
+
 impl Hwp5BinResolver {
     /// raw BinData 바이트를 복호화(암호 문서)+압축 해제한다.
     /// 비암호 문서에서 압축 해제 실패 시 원본을 그대로 반환한다(기존 동작).
@@ -1869,10 +1893,7 @@ impl Hwp5BinResolver {
             )
             .ok()
         } else {
-            match cfb_reader::decompress_stream(raw) {
-                Ok(d) => Some(d),
-                Err(_) => Some(raw.to_vec()),
-            }
+            decompress_plain_bin_data(key, raw.to_vec(), crate::model::bin_data::MAX_BIN_DATA_BYTES)
         }
     }
 }
@@ -2179,9 +2200,14 @@ fn load_bin_data_content(
                         }
                     }
                 } else {
-                    match cfb_reader::decompress_stream(&data) {
-                        Ok(d) => d,
-                        Err(_) => data, // 압축 해제 실패 시 원본 사용 (비압축 데이터)
+                    // 압축 해제 실패 시 원본 사용 (비압축 데이터), 상한 초과 시 건너뜀
+                    match decompress_plain_bin_data(
+                        &storage_name,
+                        data,
+                        crate::model::bin_data::MAX_BIN_DATA_BYTES,
+                    ) {
+                        Some(d) => d,
+                        None => continue,
                     }
                 };
 
@@ -3703,5 +3729,100 @@ mod tests {
                 .expect("저장 고아 BinData"),
             ORPHAN_TEXT
         );
+    }
+
+    /// 비암호 BinData 압축 해제는 상한을 넘지 못하고, 압축이 아닌 데이터는 원본 그대로 쓴다.
+    #[test]
+    fn plain_bin_data_decompression_is_bounded() {
+        let zeros = raw_deflate(&vec![0u8; 2000]);
+        assert_eq!(
+            decompress_plain_bin_data("BIN0001.bin", zeros.clone(), 4000).map(|d| d.len()),
+            Some(2000)
+        );
+        assert!(decompress_plain_bin_data("BIN0001.bin", zeros, 1000).is_none());
+
+        // 압축 해제에 실패하는 입력(비압축 데이터)은 원본을 그대로 돌려준다.
+        let plain = b"not a deflate stream".to_vec();
+        assert_eq!(
+            decompress_plain_bin_data("BIN0001.bin", plain.clone(), 1000),
+            Some(plain)
+        );
+    }
+
+    /// 압축 폭탄 BinData — 작은 압축 스트림이 `MAX_BIN_DATA_BYTES`를 넘게 풀리는 HWP.
+    fn bomb_hwp_for_test(decompressed_len: usize) -> (Vec<u8>, u16) {
+        use crate::model::bin_data::{
+            BinData, BinDataCompression, BinDataContent, BinDataStatus, BinDataType,
+        };
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        const STORAGE_ID: u16 = 1;
+        let mut doc = Document::default();
+        doc.header.version = crate::model::document::HwpVersion {
+            major: 5,
+            minor: 0,
+            build: 1,
+            revision: 7,
+        };
+        doc.doc_properties.section_count = 1;
+        doc.sections.push(crate::model::document::Section {
+            paragraphs: vec![crate::model::paragraph::Paragraph {
+                text: "압축 폭탄".to_string(),
+                char_count: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        doc.doc_info.bin_data_list.push(BinData {
+            raw_data: None,
+            attr: 0x0011, // Embedding + Compress
+            data_type: BinDataType::Embedding,
+            compression: BinDataCompression::Compress,
+            status: BinDataStatus::NotAccessed,
+            abs_path: None,
+            rel_path: None,
+            storage_id: STORAGE_ID,
+            extension: Some("bomb".to_string()),
+        });
+        doc.bin_data_content.push(BinDataContent {
+            id: STORAGE_ID,
+            data: vec![0u8; 16].into(),
+            extension: "bomb".to_string(),
+        });
+        doc.doc_info.raw_stream_dirty = true;
+        let base = crate::serializer::serialize_document(&doc).expect("기준 HWP 생성");
+
+        // 0으로만 채운 데이터를 조각 단위로 압축해 수 MB 스트림을 만든다.
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        let chunk = vec![0u8; 1024 * 1024];
+        let mut left = decompressed_len;
+        while left > 0 {
+            let n = left.min(chunk.len());
+            encoder.write_all(&chunk[..n]).unwrap();
+            left -= n;
+        }
+        let bomb = encoder.finish().unwrap();
+        (
+            add_raw_streams(&base, &[("/BinData/BIN0001.bomb", bomb.as_slice())]),
+            STORAGE_ID,
+        )
+    }
+
+    /// 압축 폭탄 BinData가 든 HWP도 문서 자체는 열리고, 상한을 넘는 BinData만 빠진다.
+    #[test]
+    fn hwp5_plain_bin_data_bomb_is_rejected_without_blowing_up() {
+        let (bomb, storage_id) =
+            bomb_hwp_for_test(crate::model::bin_data::MAX_BIN_DATA_BYTES + 1024 * 1024);
+        let doc = parse_document(&bomb).expect("문서 본문은 열려야 한다");
+        assert_eq!(total_paragraphs(&doc), 1);
+        let loaded = doc
+            .bin_data_content
+            .iter()
+            .find(|content| content.id == storage_id)
+            .map(|content| content.data.load().len())
+            .unwrap_or(0);
+        assert_eq!(loaded, 0, "상한을 넘는 BinData는 비어 있어야 한다");
     }
 }
