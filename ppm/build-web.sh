@@ -46,9 +46,7 @@ fi
 
 # 3-1) 진입 HTML 전부에 CSP meta (host 빌드에만. 외부 출처 요청을 브라우저가 막는다)
 node "$root/ppm/inject-csp.mjs" "$out"
-for f in "$out/index.html" "$out/print.html"; do
-  grep -q 'http-equiv="Content-Security-Policy"' "$f" || { echo "error: $f 에 CSP meta 가 없다" >&2; exit 1; }
-done
+node "$root/ppm/inject-csp.mjs" --check "$out"
 
 # 4) 배포에 필요 없는 것을 뺀다: 샘플 문서, 예비 wasm glue(public 복사본), 타입 선언.
 #    wasm 은 assets/ 의 해시 파일 하나만 쓴다.
