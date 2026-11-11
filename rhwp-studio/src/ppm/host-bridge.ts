@@ -84,7 +84,8 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
  */
 const REASON_TEXT = {
   'password-protected': '암호가 걸린 문서는 저장할 수 없습니다',
-  'unsupported-format': '저장할 수 없는 형식입니다',
+  'unsupported-format': 'HWP·HWPX 파일만 다룰 수 있습니다',
+  'invalid-bytes': '문서 바이트가 비어 있거나 형식이 틀립니다',
   'export-failed': '문서를 저장 형식으로 만들지 못했습니다',
   'open-failed': '문서를 열지 못했습니다',
   'init-failed': '편집기를 시작하지 못했습니다',
@@ -120,9 +121,9 @@ export function createHostBridge(deps: HostBridgeDeps) {
   async function handleOpen(d: Record<string, unknown>): Promise<void> {
     const name = typeof d.name === 'string' ? d.name : '';
     const bytes = toBytes(d.bytes);
-    if (!bytes || bytes.length === 0) return fail('open: bytes 가 비어 있거나 형식이 틀립니다');
+    if (!bytes || bytes.length === 0) return fail(failureText('open', 'invalid-bytes'));
     const openFormat = sniffHwpFormat(bytes);
-    if (!openFormat) return fail('open: HWP·HWPX 파일만 열 수 있습니다');
+    if (!openFormat) return fail(failureText('open', 'unsupported-format'));
     const policy = d.policy as { overrides?: unknown } | undefined;
     deps.setOverrides(sanitizeOverrides(policy?.overrides));
     try {

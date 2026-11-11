@@ -55,6 +55,11 @@ test('open: PDF·빈 바이트는 failed', async () => {
   await tick();
   assert.equal(posted.length, 2);
   assert.ok(posted.every((p) => p.type === 'hwpcraft:failed'));
+  assert.deepEqual(posted.map((p) => p.error), [
+    'open: unsupported-format (HWP·HWPX 파일만 다룰 수 있습니다)',
+    'open: invalid-bytes (문서 바이트가 비어 있거나 형식이 틀립니다)',
+  ]);
+  for (const p of posted) assert.match(String(p.error), /^(open|save|init): [a-z-]+ \(.+\)$/);
   assert.deepEqual(calls, []);
 });
 
