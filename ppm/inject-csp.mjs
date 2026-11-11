@@ -3,7 +3,7 @@
 // 외부 출처 요청을 브라우저가 막게 하는 방어선이다. meta 로 못 거는 frame-ancestors 등은 서빙 쪽 헤더 몫.
 // 사용: node ppm/inject-csp.mjs <dist/web 폴더>   (주입)
 //       node ppm/inject-csp.mjs --check <dist/web 폴더>   (검사)
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -66,7 +66,8 @@ export function checkDir(dir) {
   return { bad, count };
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+// Node 는 import.meta.url 을 실경로로 풀지만 argv[1] 은 준 그대로라(심볼릭 링크) 실경로로 맞춰 비교한다.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const check = process.argv[2] === '--check';
   const dir = check ? process.argv[3] : process.argv[2];
   if (!dir) { console.error('usage: inject-csp.mjs [--check] <dist/web>'); process.exit(2); }
