@@ -6,14 +6,14 @@ export type HostOutputFormat = 'hwp' | 'hwpx' | 'hml' | 'html' | 'doc';
 
 export interface HostOutputFile { name: string; bytes: Uint8Array; format: HostOutputFormat }
 
-type HostOutputSink = (file: HostOutputFile) => void;
+type HostOutputSink = (file: HostOutputFile) => void | Promise<void>;
 
 let sink: HostOutputSink | null = null;
 
 export function setHostOutput(next: HostOutputSink | null): void { sink = next; }
 
 /** 부모로 넘긴다. 연결 전이면 던져서 명령이 오류를 알리게 한다. */
-export function sendHostOutput(file: HostOutputFile): void {
+export async function sendHostOutput(file: HostOutputFile): Promise<void> {
   if (!sink) throw new Error('부모 창과 연결되지 않아 내보낼 수 없습니다');
-  sink(file);
+  await sink(file);
 }

@@ -165,12 +165,31 @@ test('사용자 저장은 열기·bytes 요청과 같은 순서 큐를 탄다', 
   assert.equal(posted.filter((p) => p.type === 'hwpcraft:save').length, 1);
 });
 
-test('sendOutput: 다른 형식 저장은 save 로 넘기고 문서 상태는 바꾸지 않는다', () => {
+test('sendOutput: 다른 형식 저장은 save 로 넘기고 문서 상태는 바꾸지 않는다', async () => {
   const { bridge, posted, calls } = setup();
-  bridge.sendOutput({ name: 'a.html', bytes: new Uint8Array([1, 2]), format: 'html' });
+  await bridge.sendOutput({ name: 'a.html', bytes: new Uint8Array([1, 2]), format: 'html' });
   assert.equal(posted.length, 1);
   assert.equal(posted[0].type, 'hwpcraft:save');
   assert.equal(posted[0].format, 'html');
   assert.equal(posted[0].name, 'a.html');
   assert.deepEqual(calls, []);
+});
+
+test('sendOutput: 열 때와 이름·형식이 같으면 일반 저장처럼 깨끗한 상태로 돌린다', async () => {
+  const { bridge, posted, calls } = setup();
+  bridge.handle({ type: 'hwpcraft:open', name: '공문.hwp', bytes: OLE });
+  await tick();
+  await bridge.sendOutput({ name: '공문.hwp', bytes: new Uint8Array([1]), format: 'hwp' });
+  assert.equal(posted.filter((p) => p.type === 'hwpcraft:save').length, 1);
+  assert.ok(calls.includes('saved:공문.hwp'));
+});
+
+test('sendOutput: 이름이나 형식이 다르면 깨끗한 상태로 돌리지 않는다', async () => {
+  const { bridge, calls } = setup();
+  bridge.handle({ type: 'hwpcraft:open', name: '공문.hwp', bytes: OLE });
+  await tick();
+  await bridge.sendOutput({ name: '다른.hwp', bytes: new Uint8Array([1]), format: 'hwp' });
+  await bridge.sendOutput({ name: '공문.hwp', bytes: new Uint8Array([1]), format: 'hwpx' });
+  await bridge.sendOutput({ name: '공문.html', bytes: new Uint8Array([1]), format: 'html' });
+  assert.equal(calls.filter((c) => c.startsWith('saved:')).length, 0);
 });

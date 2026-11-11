@@ -89,18 +89,23 @@ export function createHostBridge(deps: HostBridgeDeps) {
     return run;
   };
 
+  // 마지막으로 연 문서의 이름·형식. 같은 이름·같은 형식 저장은 부모가 일반 저장과 구분할 수 없다.
+  let opened: { name: string; format: HwpFormat } | null = null;
+
   const fail = (error: string) => deps.post({ type: `${PREFIX}:failed`, error });
 
   async function handleOpen(d: Record<string, unknown>): Promise<void> {
     const name = typeof d.name === 'string' ? d.name : '';
     const bytes = toBytes(d.bytes);
     if (!bytes || bytes.length === 0) return fail('open: bytes 가 비어 있거나 형식이 틀립니다');
-    if (!sniffHwpFormat(bytes)) return fail('open: HWP·HWPX 파일만 열 수 있습니다');
+    const openFormat = sniffHwpFormat(bytes);
+    if (!openFormat) return fail('open: HWP·HWPX 파일만 열 수 있습니다');
     const policy = d.policy as { overrides?: unknown } | undefined;
     deps.setOverrides(sanitizeOverrides(policy?.overrides));
     try {
       await deps.ready();
       await deps.openDocument(name, bytes);
+      opened = { name, format: openFormat };
     } catch (e) {
       fail(`open: ${errText(e)}`);
     }
@@ -210,10 +215,15 @@ export function createHostBridge(deps: HostBridgeDeps) {
       // open·request-bytes 와 같은 순서 큐에 넣어, 문서가 바뀌는 중에 내보내지 않게 한다.
       return enqueue(() => saveNow());
     },
-    /** 정책으로 켠 다른 형식 저장·내보내기: 부모의 save 이벤트로 넘긴다. 문서 상태(dirty)는 바꾸지 않는다. */
-    sendOutput(file: { name: string; bytes: Uint8Array; format: string }): void {
+    /**
+     * 정책으로 켠 다른 형식 저장·내보내기: 부모의 save 이벤트로 넘긴다.
+     * 열 때와 이름·형식이 모두 같으면 부모가 일반 저장으로 받으므로 일반 저장과 같게 깨끗한 상태로 돌린다.
+     * 그 밖에는 문서 상태(dirty)를 바꾸지 않는다.
+     */
+    async sendOutput(file: { name: string; bytes: Uint8Array; format: string }): Promise<void> {
       const buf = toArrayBuffer(file.bytes);
       deps.post({ type: `${PREFIX}:save`, name: file.name, bytes: buf, format: file.format }, [buf]);
+      if (opened && file.name === opened.name && file.format === opened.format) await deps.markSaved(file.name);
     },
   };
 }

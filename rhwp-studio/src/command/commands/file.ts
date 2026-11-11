@@ -255,13 +255,13 @@ function completeHandleSave(
   services.documentState.markClean(reason);
 }
 
-function exportHtmlBasedFile(services: CommandServices, format: HtmlExportFormat): void {
+async function exportHtmlBasedFile(services: CommandServices, format: HtmlExportFormat): Promise<void> {
   const label = HTML_EXPORT_DETAILS[format].label;
   try {
     const file = buildHtmlExportFile(services.wasm, format, services.wasm.fileName);
     if (PPM_HOST) {
       // 내려받기 대신 부모의 save 이벤트로 넘긴다.
-      sendHostOutput({ name: file.fileName, bytes: new TextEncoder().encode(file.content), format });
+      await sendHostOutput({ name: file.fileName, bytes: new TextEncoder().encode(file.content), format });
       return;
     }
     downloadBlob(new Blob([file.content], { type: file.mimeType }), file.fileName);
@@ -351,7 +351,7 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     if (PPM_HOST) {
       // 다른 형식 저장도 사용자 PC가 아니라 부모로 넘긴다(문서 상태는 바꾸지 않는다).
       const bytes = new Uint8Array(await payload.blob.arrayBuffer());
-      sendHostOutput({ name: saveName, bytes, format });
+      await sendHostOutput({ name: saveName, bytes, format });
       return;
     }
     const originalHandle = sourceFormat === 'hml' || sourceFormat === 'pdf'
