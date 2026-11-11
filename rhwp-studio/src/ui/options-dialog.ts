@@ -3,6 +3,7 @@
  *
  * 탭 구조: [글꼴] (향후 [편집], [보기] 등 탭 추가 가능)
  */
+import { PPM_HOST } from '@/ppm/host-mode';
 import { ModalDialog } from './dialog';
 import { userSettings } from '@/core/user-settings';
 import { FontSetDialog } from './font-set-dialog';
@@ -245,7 +246,8 @@ export class OptionsDialog extends ModalDialog {
     localSection.appendChild(localRow);
     localSection.appendChild(localStatus);
 
-    panel.appendChild(localSection);
+    // PPM host: 컴퓨터 글꼴 불러오기 UI 는 붙이지 않는다(관리자 글꼴만 쓴다).
+    if (!PPM_HOST) panel.appendChild(localSection);
 
     return panel;
   }

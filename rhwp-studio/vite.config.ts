@@ -25,6 +25,11 @@ const withHwpctrl = process.env.RHWP_WITHOUT_HWPCTRL !== '1';
  * AI 청크와 제공자 SDK 가 산출물에 남지 않는다.
  */
 const withAi = process.env.RHWP_WITHOUT_AI !== '1';
+/**
+ * PPM 호스트 모드 빌드 (`RHWP_PPM_HOST=1`, ppm/build-web.sh가 켠다).
+ * 문서 출입을 부모(PPM)가 맡고, 서비스 워커(PWA)는 만들지 않는다 — 호스트 출처에 등록되면 안 된다.
+ */
+const ppmHost = process.env.RHWP_PPM_HOST === '1';
 
 export default defineConfig({
   define: {
@@ -36,6 +41,7 @@ export default defineConfig({
     ),
     __RHWP_HWPCTRL__: JSON.stringify(withHwpctrl),
     __RHWP_AI__: JSON.stringify(withAi),
+    __RHWP_PPM_HOST__: JSON.stringify(ppmHost),
   },
   resolve: {
     alias: {
@@ -146,7 +152,7 @@ export default defineConfig({
         });
       },
     },
-    VitePWA({
+    ...(ppmHost ? [] : [VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'icons/*.png'],
       manifest: {
@@ -197,6 +203,6 @@ export default defineConfig({
       devOptions: {
         enabled: false,
       },
-    }),
+    })]),
   ],
 });

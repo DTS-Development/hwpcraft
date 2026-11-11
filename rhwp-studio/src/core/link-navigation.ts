@@ -9,6 +9,11 @@ export function setLinkHostHandler(handler: LinkHostHandler | null): void {
   host = handler;
 }
 
+// PPM host: 문서 밖으로 나가는 링크(웹·메일·파일·앱)를 막는 스위치. 문서 안 책갈피 이동은 항상 허용한다.
+let externalBlocked: () => boolean = () => false;
+export function setExternalLinkBlocked(predicate: () => boolean): void { externalBlocked = predicate; }
+export function isExternalLinkBlocked(): boolean { return externalBlocked(); }
+
 /** Called exclusively from a verified click; classification belongs to Rust. */
 export function navigateLink(destination: LinkDestination, context: LinkHostContext, actions: {
   anchor(name: string): boolean;
@@ -20,6 +25,7 @@ export function navigateLink(destination: LinkDestination, context: LinkHostCont
     try { return actions.anchor(decodeURIComponent(destination.uri.slice(1))); }
     catch { return false; }
   }
+  if (externalBlocked()) return false;
   if (destination.kind === 'web') return actions.web(destination.uri);
   if (host) {
     const fallback = (handled: boolean) => {

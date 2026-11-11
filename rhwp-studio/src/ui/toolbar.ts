@@ -5,7 +5,8 @@ import type { CharProperties, ParaProperties } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import { userSettings } from '@/core/user-settings';
 import type { FontSet } from '@/core/user-settings';
-import { getLocalFonts } from '@/core/local-fonts';
+import { getHostFontFamilies, getLocalFonts } from '@/core/local-fonts';
+import { PPM_HOST } from '@/ppm/host-mode';
 
 import { t } from '../i18n/index.ts';
 type FontMenuCategory = 'all' | 'current' | 'document' | 'fontSets' | 'system';
@@ -790,7 +791,8 @@ export class Toolbar {
     const categories = document.createElement('div');
     categories.className = 'font-picker-categories';
     categories.setAttribute('role', 'tablist');
-    for (const category of FONT_MENU_CATEGORIES) {
+    // PPM host: 컴퓨터(시스템) 글꼴 칸은 숨긴다. 관리자 글꼴(addFonts)은 '모든 글꼴'에 나온다.
+    for (const category of FONT_MENU_CATEGORIES.filter(item => !(PPM_HOST && item.id === 'system'))) {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'font-picker-category';
@@ -896,6 +898,7 @@ export class Toolbar {
       value: `__fontset__${fontSet.name}`,
       label: `◆ ${fontSet.name}`,
     }));
+    const hostFonts = getHostFontFamilies().map(name => ({ value: name, label: name }));
     switch (category) {
       case 'current':
         return current;
@@ -911,6 +914,7 @@ export class Toolbar {
           ...documentFonts,
           ...baseFonts,
           ...fontSets,
+          ...hostFonts,
           ...getLocalFonts().map(name => ({ value: name, label: name })),
         ]);
     }

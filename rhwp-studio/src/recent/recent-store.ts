@@ -15,6 +15,7 @@
  * 테스트/제한 환경에서는 메모리 저장소로 폴백한다.
  */
 
+import { PPM_HOST } from '../ppm/host-mode.ts';
 import type { FileSystemFileHandleLike } from '@/command/file-system-access';
 
 const DB_NAME = 'rhwpStudioRecent';
@@ -144,6 +145,8 @@ function sortAndTrim(rows: RecentDoc[]): RecentDoc[] {
  * 로 재시도한다 — 기록 자체는 남긴다.
  */
 export async function addRecentDoc(input: RecentDocInput): Promise<void> {
+  // PPM host: 문서 이름을 브라우저에 남기지 않는다.
+  if (PPM_HOST) return;
   const entry: RecentDoc = {
     id: createRecentId(),
     fileName: input.fileName,
@@ -190,6 +193,7 @@ export async function addRecentDoc(input: RecentDocInput): Promise<void> {
 
 /** 최근 문서 목록(최신순). */
 export async function listRecentDocs(): Promise<RecentDoc[]> {
+  if (PPM_HOST) return [];
   return withDb(
     async (db) => sortAndTrim(await getAllRows(db)),
     async () => sortAndTrim([...memory.values()]),

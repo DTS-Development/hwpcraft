@@ -1,4 +1,6 @@
 import { RecoveryCipher } from '../../recovery/recovery-crypto';
+import { PPM_HOST } from '../../ppm/host-mode.ts';
+import { sendHostOutput } from '../../ppm/host-output.ts';
 import type { CommandDef, CommandServices } from '../types';
 import {
   buildHtmlExportFile,
@@ -157,6 +159,10 @@ function createSavePayload(
       requirePasswordSaveFormat(format),
       password,
     );
+  // PPM host: 내용 손실 보고가 있으면 저장하지 않는다(부모 저장 경로와 같은 규칙).
+  if (PPM_HOST && artifact.contentLoss && artifact.contentLoss.count > 0) {
+    throw new Error(`저장하면 문서 내용 ${artifact.contentLoss.count}건이 사라져 저장을 거절했습니다 (content-loss)`);
+  }
   return {
     blob: new Blob([artifact.bytes as unknown as BlobPart], {
       type: SAVE_FORMAT_DETAILS[format].mimeType,
@@ -249,10 +255,15 @@ function completeHandleSave(
   services.documentState.markClean(reason);
 }
 
-function exportHtmlBasedFile(services: CommandServices, format: HtmlExportFormat): void {
+async function exportHtmlBasedFile(services: CommandServices, format: HtmlExportFormat): Promise<void> {
   const label = HTML_EXPORT_DETAILS[format].label;
   try {
     const file = buildHtmlExportFile(services.wasm, format, services.wasm.fileName);
+    if (PPM_HOST) {
+      // 내려받기 대신 부모의 save 이벤트로 넘긴다.
+      await sendHostOutput({ name: file.fileName, bytes: new TextEncoder().encode(file.content), format });
+      return;
+    }
     downloadBlob(new Blob([file.content], { type: file.mimeType }), file.fileName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -297,8 +308,9 @@ async function promptSaveAsOptions(
     saveBaseNameFor(services.wasm.fileName, format),
     format,
     {
-      allowPassword: passwordFormat,
-      inheritPassword: protectedDoc && passwordFormat,
+      // host 모드는 부모가 열 수 없는 암호 문서를 만들지 않는다.
+      allowPassword: passwordFormat && !PPM_HOST,
+      inheritPassword: protectedDoc && passwordFormat && !PPM_HOST,
     },
   );
   if (selection === null) return null;
@@ -336,6 +348,12 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     recoveryCipher = password !== null ? await RecoveryCipher.create(password) : null;
     if (services.wasm.documentGeneration !== generation) throw new Error('DOCUMENT_CHANGED_DURING_SAVE');
     const payload = createSavePayload(services, format, password ?? undefined);
+    if (PPM_HOST) {
+      // 다른 형식 저장도 사용자 PC가 아니라 부모로 넘긴다(문서 상태는 바꾸지 않는다).
+      const bytes = new Uint8Array(await payload.blob.arrayBuffer());
+      await sendHostOutput({ name: saveName, bytes, format });
+      return;
+    }
     const originalHandle = sourceFormat === 'hml' || sourceFormat === 'pdf'
       ? services.wasm.currentFileHandle : null;
     const result = await persistWithContentLoss(
