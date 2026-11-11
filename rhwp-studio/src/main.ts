@@ -1075,6 +1075,8 @@ function setupFileInput(): void {
 
   fileInput.addEventListener('change', async (e) => {
     const input = e.target as HTMLInputElement;
+    // PPM host: 문서 열기는 부모만 한다. 링크 대화상자 등 다른 경로로 파일이 골라져도 열지 않는다(locked file:open 우회 방지).
+    if (PPM_HOST) { input.value = ''; return; }
     const skipUnsavedGuard = input.dataset.skipUnsavedGuard === 'true';
     delete input.dataset.skipUnsavedGuard;
     const file = input.files?.[0];
@@ -1594,6 +1596,8 @@ async function initializeDocument(
 }
 
 async function promptLocalFontsIfNeeded(displayName: string): Promise<void> {
+  // PPM host: 컴퓨터 글꼴 허용 안내를 띄우지 않는다.
+  if (PPM_HOST) return;
   try {
     if (!getLocalFontState().loaded) await loadStoredLocalFonts();
     if (getLocalFontState().stored) return;

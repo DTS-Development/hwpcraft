@@ -1314,6 +1314,11 @@ export function getHostFontState(): { active: boolean; generation: number; count
     count: hostFontSource.references().length, lastError: hostFontSource.lastError };
 }
 
+/** 부모가 addFonts 로 올린 관리자 글꼴의 가족 이름(중복 제거). 글꼴 목록 UI 용. */
+export function getHostFontFamilies(): string[] {
+  return [...new Set(hostFontSource.references().map(reference => reference.face.family))];
+}
+
 function currentHostRecords(): LocalFontRecord[] {
   const references = hostFontSource.references();
   // The catalog can finish loading without changing the invalidation generation.

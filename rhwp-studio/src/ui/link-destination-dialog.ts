@@ -1,5 +1,6 @@
 import { ModalDialog } from './dialog';
 import type { LinkDestination } from '../core/link-navigation';
+import { PPM_HOST } from '../ppm/host-mode';
 
 class LinkDestinationDialog extends ModalDialog {
   constructor(private readonly target: LinkDestination) { super('연결된 문서 또는 앱 열기', 500); }
@@ -17,7 +18,7 @@ class LinkDestinationDialog extends ModalDialog {
   }
   protected onConfirm(): boolean {
     if (this.target.kind === 'registeredApplication') window.location.assign(this.target.uri);
-    else document.getElementById('file-input')?.click();
+    else if (!PPM_HOST) document.getElementById('file-input')?.click();
     return true;
   }
   override show(): void {

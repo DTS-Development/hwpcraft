@@ -57,10 +57,14 @@ export function sniffHwpFormat(bytes: Uint8Array): HwpFormat | null {
   return null;
 }
 
-/** 저장 파일명: 형식에 맞는 확장자로 맞춘다. */
+/**
+ * 저장 파일명. 부모는 open 의 name 과 글자 그대로 비교하므로(대소문자 포함),
+ * 이미 형식에 맞는 확장자면 원래 이름을 그대로 쓴다. 확장자가 없거나 형식과 다를 때만 맞춘다.
+ */
 export function saveFileName(name: string, format: HwpFormat): string {
-  const base = (name || 'document').replace(/\.(hwp|hwpx)$/i, '');
-  return `${base}.${format}`;
+  const raw = name || 'document';
+  if (raw.toLowerCase().endsWith(`.${format}`)) return raw;
+  return `${raw.replace(/\.(hwp|hwpx)$/i, '')}.${format}`;
 }
 
 function toBytes(value: unknown): Uint8Array | null {
@@ -158,6 +162,26 @@ export function createHostBridge(deps: HostBridgeDeps) {
     deps.post({ type: `${PREFIX}:fonts-added`, id, installed: result.installed, failed: [...failed, ...result.failed] });
   }
 
+  async function saveNow(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    let snap: SaveSnapshot;
+    try {
+      snap = deps.exportCurrent();
+    } catch (e) {
+      const reason = errText(e);
+      fail(`save: ${reason}`);
+      return { ok: false, reason };
+    }
+    if (snap.lossCount > 0) {
+      fail(`save: content-loss (${snap.lossCount}건)`);
+      return { ok: false, reason: 'content-loss' };
+    }
+    const name = saveFileName(snap.name, snap.format);
+    const buf = toArrayBuffer(snap.bytes);
+    deps.post({ type: `${PREFIX}:save`, name, bytes: buf, format: snap.format }, [buf]);
+    await deps.markSaved(name);
+    return { ok: true };
+  }
+
   return {
     /** window message 이벤트 처리. 신뢰 검사(출처·source)는 호출한 쪽이 한다. */
     handle(data: unknown): void {
@@ -182,24 +206,14 @@ export function createHostBridge(deps: HostBridgeDeps) {
     sendDirty(dirty: boolean): void { deps.post({ type: `${PREFIX}:dirty`, dirty }); },
     sendFailed(error: string): void { fail(error.slice(0, 200)); },
     /** 사용자가 파일 > 저장을 눌렀을 때. 손실이 있으면 거절하고 이유를 부모에 알린다. */
-    async saveFromUser(): Promise<{ ok: true } | { ok: false; reason: string }> {
-      let snap: SaveSnapshot;
-      try {
-        snap = deps.exportCurrent();
-      } catch (e) {
-        const reason = errText(e);
-        fail(`save: ${reason}`);
-        return { ok: false, reason };
-      }
-      if (snap.lossCount > 0) {
-        fail(`save: content-loss (${snap.lossCount}건)`);
-        return { ok: false, reason: 'content-loss' };
-      }
-      const name = saveFileName(snap.name, snap.format);
-      const buf = toArrayBuffer(snap.bytes);
-      deps.post({ type: `${PREFIX}:save`, name, bytes: buf }, [buf]);
-      await deps.markSaved(name);
-      return { ok: true };
+    saveFromUser(): Promise<{ ok: true } | { ok: false; reason: string }> {
+      // open·request-bytes 와 같은 순서 큐에 넣어, 문서가 바뀌는 중에 내보내지 않게 한다.
+      return enqueue(() => saveNow());
+    },
+    /** 정책으로 켠 다른 형식 저장·내보내기: 부모의 save 이벤트로 넘긴다. 문서 상태(dirty)는 바꾸지 않는다. */
+    sendOutput(file: { name: string; bytes: Uint8Array; format: string }): void {
+      const buf = toArrayBuffer(file.bytes);
+      deps.post({ type: `${PREFIX}:save`, name: file.name, bytes: buf, format: file.format }, [buf]);
     },
   };
 }

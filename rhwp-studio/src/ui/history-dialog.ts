@@ -25,6 +25,7 @@
  * - 위치 표기는 `leftSectionPage/rightSectionPage` 우선, 없으면 anchor.pageIndex 폴백 순서 유지.
  */
 import type { CommandServices } from '@/command/types';
+import { PPM_HOST } from '@/ppm/host-mode';
 import { formatDiffLocationCombined } from '@/compare/diff-location-label';
 import { buildSnapshotFromWasm, compareDocuments, compareSnapshots } from '@/compare/diff-engine';
 import type { CompareSessionStore } from '@/compare/session';
@@ -252,7 +253,8 @@ export class HistoryDialog {
         }
         session = await compareDocuments(payload.bytes, leftName, cur, rightName, HISTORY_COMPARE_OPTS);
       }
-      console.log('[rhwp:history] 최종 Diff 배열', session.diffItems);
+      // PPM host 는 문서 본문이 콘솔에 남지 않게 한다.
+      if (!PPM_HOST) console.log('[rhwp:history] 최종 Diff 배열', session.diffItems);
       this.compareSessionStore.set(session);
       const mode =
         session.textCompareStrategyUsed === 'identity' ? t('dialog.history.onCompareWithCurrent.text.x9cae02') : t('dialog.history.onCompareWithCurrent.text.x09d3e7');

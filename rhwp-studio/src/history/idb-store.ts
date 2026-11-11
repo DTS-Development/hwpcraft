@@ -6,6 +6,7 @@
 
 import type { CompareDocumentSnapshot } from '@/compare/types';
 import type { DocHistoryEntryMeta } from './types';
+import { PPM_HOST } from '@/ppm/host-mode';
 
 const DB_NAME = 'rhwpStudioDocHistory';
 const DB_VER = 1;
@@ -28,6 +29,8 @@ export type HistoryPayload =
   | { kind: 'legacy'; bytes: Uint8Array };
 
 function idbAvailable(): boolean {
+  // PPM host: 문서는 부모가 보관하므로 브라우저(같은 출처 IndexedDB)에 남기지 않고 메모리만 쓴다.
+  if (PPM_HOST) return false;
   return typeof indexedDB !== 'undefined';
 }
 

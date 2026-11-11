@@ -36,17 +36,32 @@ export type CommandGate = (commandId: string) => CommandGateResult;
 
 /** 통합 커맨드 디스패처: 메뉴/툴바/키보드 모든 입력의 단일 실행 경로 */
 export class CommandDispatcher {
-  constructor(
-    private registry: CommandRegistry,
-    private services: CommandServices,
-    private eventBus: EventBus,
-  ) {}
+  // 매개변수 속성 대신 명시 필드: node 의 타입 제거 실행(시험)에서도 읽히게 한다.
+  private registry: CommandRegistry;
+  private services: CommandServices;
+  private eventBus: EventBus;
+
+  constructor(registry: CommandRegistry, services: CommandServices, eventBus: EventBus) {
+    this.registry = registry;
+    this.services = services;
+    this.eventBus = eventBus;
+  }
 
   private gate: CommandGate | null = null;
 
   /** 호스트 정책 게이트를 건다. dispatch 와 isEnabled 가 모두 이 게이트를 지난다. */
   setGate(gate: CommandGate | null): void {
     this.gate = gate;
+  }
+
+  private onHandled: ((commandId: string) => void) | null = null;
+
+  /**
+   * 게이트가 'handled' 로 답한 명령의 실제 처리. 게이트는 isEnabled 에서도 불리므로 판정만 하고,
+   * 부작용(예: 부모로 저장 넘기기)은 실행 경로인 dispatchWithResult 에서만 이 콜백으로 한다.
+   */
+  setHandledHandler(handler: ((commandId: string) => void) | null): void {
+    this.onHandled = handler;
   }
 
   /**
@@ -72,7 +87,15 @@ export class CommandDispatcher {
 
     const gated = this.gate?.(commandId) ?? 'allow';
     if (gated === 'deny') return { ok: false, reason: 'disabled' };
-    if (gated === 'handled') return { ok: true };
+    if (gated === 'handled') {
+      try {
+        this.onHandled?.(commandId);
+      } catch (err) {
+        console.error(`[CommandDispatcher] 위임 처리 실패: ${commandId}`, err);
+        return { ok: false, reason: 'threw', message: err instanceof Error ? err.message : String(err) };
+      }
+      return { ok: true };
+    }
 
     const ctx = this.services.getContext();
     if (isBlockedInFormMode(commandId, ctx)) {

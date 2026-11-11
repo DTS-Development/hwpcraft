@@ -33,7 +33,11 @@ test('sniff: HWP·HWPX만 통과', () => {
 test('saveFileName: 형식에 맞는 확장자', () => {
   assert.equal(saveFileName('a.hwp', 'hwpx'), 'a.hwpx');
   assert.equal(saveFileName('', 'hwp'), 'document.hwp');
-  assert.equal(saveFileName('보고서.HWPX', 'hwpx'), '보고서.hwpx');
+  // 형식에 맞는 확장자면 원래 표기(대소문자)를 그대로 쓴다. 부모는 open 의 name 과 글자 그대로 비교한다.
+  assert.equal(saveFileName('보고서.HWPX', 'hwpx'), '보고서.HWPX');
+  assert.equal(saveFileName('공문.HWP', 'hwp'), '공문.HWP');
+  assert.equal(saveFileName('공문', 'hwp'), '공문.hwp');
+  assert.equal(saveFileName('x.HWP', 'hwpx'), 'x.hwpx');
 });
 
 test('open: 정책을 적용하고 문서를 연다', async () => {
@@ -137,4 +141,36 @@ test('다른 접두사·형식 오류는 무시', async () => {
   bridge.handle('x');
   await tick();
   assert.deepEqual([posted, calls], [[], []]);
+});
+
+test('사용자 저장: save 에 형식이 실리고 한 번만 나간다', async () => {
+  const { bridge, posted, calls } = setup();
+  const r = await bridge.saveFromUser();
+  assert.deepEqual(r, { ok: true });
+  assert.equal(posted.filter((p) => p.type === 'hwpcraft:save').length, 1);
+  assert.equal(posted[0].format, 'hwpx');
+  assert.deepEqual(calls, ['saved:a.hwpx']);
+});
+
+test('사용자 저장은 열기·bytes 요청과 같은 순서 큐를 탄다', async () => {
+  let release!: () => void;
+  const gateOpen = new Promise<void>((r) => { release = r; });
+  const { bridge, posted } = setup({ openDocument: async () => { await gateOpen; } });
+  bridge.handle({ type: 'hwpcraft:open', name: 'x.hwp', bytes: OLE });
+  const saving = bridge.saveFromUser();
+  await tick();
+  assert.equal(posted.length, 0, 'open 이 끝나기 전에는 내보내지 않는다');
+  release();
+  await saving;
+  assert.equal(posted.filter((p) => p.type === 'hwpcraft:save').length, 1);
+});
+
+test('sendOutput: 다른 형식 저장은 save 로 넘기고 문서 상태는 바꾸지 않는다', () => {
+  const { bridge, posted, calls } = setup();
+  bridge.sendOutput({ name: 'a.html', bytes: new Uint8Array([1, 2]), format: 'html' });
+  assert.equal(posted.length, 1);
+  assert.equal(posted[0].type, 'hwpcraft:save');
+  assert.equal(posted[0].format, 'html');
+  assert.equal(posted[0].name, 'a.html');
+  assert.deepEqual(calls, []);
 });

@@ -7,12 +7,13 @@ import { isExternalLinkBlockedBy } from './external-link.ts';
 import { isCommandAllowed, sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
 import { createHostBridge, type SaveSnapshot, type HwpFormat } from './host-bridge.ts';
 import { PpmHostFonts } from './host-fonts.ts';
+import { setHostOutput } from './host-output.ts';
 import { isHostConnected, PPM_HOST_MARKER } from './host-mode.ts';
 
 interface ReportArtifact { bytes: Uint8Array; contentLoss: { count: number; losses: SaveSnapshot['losses'] } }
 
 export interface HostInstallOptions {
-  dispatcher: { setGate(gate: CommandGate | null): void };
+  dispatcher: { setGate(gate: CommandGate | null): void; setHandledHandler(handler: ((commandId: string) => void) | null): void };
   knownCommandIds(): string[];
   eventBus: { on(name: string, handler: (payload: any) => void): unknown };
   wasm: {
@@ -95,16 +96,17 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
     addFonts: async (list) => fonts.add(list),
   });
 
+  // 게이트는 isEnabled(메뉴 상태 조회)에서도 불리므로 판정만 한다. 저장은 파일 > 저장이 실제로 실행될 때만 부모로 넘긴다.
   const gate: CommandGate = (id) => {
     if (!isCommandAllowed(id, overrides)) return 'deny';
-    // 저장은 로컬 파일이 아니라 부모에게 넘긴다.
-    if (id === 'file:save') {
-      void bridge.saveFromUser();
-      return 'handled';
-    }
-    return 'allow';
+    return id === 'file:save' ? 'handled' : 'allow';
   };
   opts.dispatcher.setGate(gate);
+  opts.dispatcher.setHandledHandler((id) => {
+    if (id === 'file:save') void bridge.saveFromUser();
+  });
+  // 정책으로 켠 다른 형식 저장·내보내기도 부모로 넘긴다.
+  setHostOutput((file) => bridge.sendOutput(file));
   refreshHiddenSurfaces();
 
   // 같은 출처의 부모 창이 보낸 메시지만 받는다.

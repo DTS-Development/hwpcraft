@@ -1,5 +1,6 @@
 import { RecoveryCipher } from '../../recovery/recovery-crypto';
 import { PPM_HOST } from '../../ppm/host-mode.ts';
+import { sendHostOutput } from '../../ppm/host-output.ts';
 import type { CommandDef, CommandServices } from '../types';
 import {
   buildHtmlExportFile,
@@ -258,6 +259,11 @@ function exportHtmlBasedFile(services: CommandServices, format: HtmlExportFormat
   const label = HTML_EXPORT_DETAILS[format].label;
   try {
     const file = buildHtmlExportFile(services.wasm, format, services.wasm.fileName);
+    if (PPM_HOST) {
+      // 내려받기 대신 부모의 save 이벤트로 넘긴다.
+      sendHostOutput({ name: file.fileName, bytes: new TextEncoder().encode(file.content), format });
+      return;
+    }
     downloadBlob(new Blob([file.content], { type: file.mimeType }), file.fileName);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -302,8 +308,9 @@ async function promptSaveAsOptions(
     saveBaseNameFor(services.wasm.fileName, format),
     format,
     {
-      allowPassword: passwordFormat,
-      inheritPassword: protectedDoc && passwordFormat,
+      // host 모드는 부모가 열 수 없는 암호 문서를 만들지 않는다.
+      allowPassword: passwordFormat && !PPM_HOST,
+      inheritPassword: protectedDoc && passwordFormat && !PPM_HOST,
     },
   );
   if (selection === null) return null;
@@ -341,6 +348,12 @@ async function saveAsFormat(services: CommandServices, format: SaveFormat): Prom
     recoveryCipher = password !== null ? await RecoveryCipher.create(password) : null;
     if (services.wasm.documentGeneration !== generation) throw new Error('DOCUMENT_CHANGED_DURING_SAVE');
     const payload = createSavePayload(services, format, password ?? undefined);
+    if (PPM_HOST) {
+      // 다른 형식 저장도 사용자 PC가 아니라 부모로 넘긴다(문서 상태는 바꾸지 않는다).
+      const bytes = new Uint8Array(await payload.blob.arrayBuffer());
+      sendHostOutput({ name: saveName, bytes, format });
+      return;
+    }
     const originalHandle = sourceFormat === 'hml' || sourceFormat === 'pdf'
       ? services.wasm.currentFileHandle : null;
     const result = await persistWithContentLoss(
