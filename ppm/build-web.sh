@@ -27,7 +27,7 @@ fi
 
 # 2) 웹: host 모드 + AI·hwpctrl·외부 웹폰트 모두 끈다. 상대 경로(--base=./)라 어느 하위 경로에서도 뜬다.
 cd "$studio"
-npm ci --no-audit --no-fund
+npm ci --ignore-scripts --no-audit --no-fund
 export RHWP_PPM_HOST=1 RHWP_WITHOUT_AI=1 RHWP_WITHOUT_HWPCTRL=1 RHWP_DISABLE_EXTERNAL_WEBFONTS=1
 npx tsc
 rm -rf "$out"
