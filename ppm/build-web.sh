@@ -14,9 +14,14 @@ case "${1:-}" in
   *) echo "usage: $0 [--skip-wasm]" >&2; exit 2 ;;
 esac
 
+# 포크의 rust-toolchain.toml 이 고른 툴체인을 쓴다(dts-craft 가 넘기는 웹 포크용 RUSTUP_TOOLCHAIN 은 이 포크에 맞지 않는다).
+chan="$(sed -n 's/^channel *= *"\([0-9][0-9.]*\)".*/\1/p' "$root/rust-toolchain.toml" | head -1)"
+[[ "$chan" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: rust-toolchain.toml 에서 툴체인 버전을 못 읽음" >&2; exit 1; }
+export RUSTUP_TOOLCHAIN="$chan"
+
 # 1) wasm (잠금 파일을 지키는 래퍼. pkg/ 와 rhwp-studio/public 에 같은 glue·wasm 이 놓인다)
 if [ "$skip_wasm" != 1 ]; then
-  (cd "$root" && sh scripts/wasm-pack-locked.sh build --target web --release)
+  (cd "$root" && sh scripts/wasm-pack-locked.sh --target web --release)
 fi
 [ -f "$root/pkg/rhwp.js" ] || { echo "error: pkg/rhwp.js 가 없다(wasm 빌드 필요)" >&2; exit 1; }
 
