@@ -123,6 +123,9 @@ impl DocumentOpenDecompressionPolicy {
 /// BinData는 DocInfo/BodyText 문서 열기 누적 예산에는 포함하지 않지만, 해당 소비 경로가
 /// crypto helper에 명시적으로 전달하는 parser 소유 정책이다.
 const MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
+/// 비암호 BinData를 즉시 로드하는 경로의 문서 전체 압축 해제 합계 상한.
+/// 항목 상한(`MAX_BIN_DATA_BYTES`, 256MiB)의 2배로, 암호 문서의 항목 상한과 같은 값이다.
+const PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -1165,6 +1168,7 @@ fn load_bin_data_content_lenient(
     use crate::model::bin_data::BinDataType;
 
     let mut contents = Vec::new();
+    let mut budget = PlainBinDataBudget::new();
 
     for bd in bin_data_list.iter() {
         let is_storage = match bd.data_type {
@@ -1186,9 +1190,34 @@ fn load_bin_data_content_lenient(
         let stream_compressed =
             bin_data_stream_is_compressed(bd.compression, compressed, encrypted);
 
+        if !encrypted {
+            // 비암호: 문서 전체 예산 + 같은 스트림 1회 해제. 건너뛴 항목은 순번 규칙대로 넣지 않는다.
+            let shared = match budget.cached(&storage_name, is_storage) {
+                Some(hit) => hit,
+                None => match lenient.read_stream(&format!("/BinData/{}", storage_name)) {
+                    Ok(data) => budget.decode(&storage_name, is_storage, data),
+                    Err(e) => {
+                        eprintln!(
+                            "경고: BinData '{}' 로드 실패 (lenient): {}",
+                            storage_name, e
+                        );
+                        continue;
+                    }
+                },
+            };
+            if let Some(bytes) = shared {
+                contents.push(BinDataContent {
+                    id: bd.storage_id,
+                    data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                    extension: ext.to_string(),
+                });
+            }
+            continue;
+        }
+
         match lenient.read_stream(&format!("/BinData/{}", storage_name)) {
             Ok(data) => {
-                let mut decompressed = if encrypted {
+                let mut decompressed = {
                     let pwd = password.unwrap();
                     match crypto::decrypt_password_protected_limited(
                         &data,
@@ -1204,15 +1233,6 @@ fn load_bin_data_content_lenient(
                             );
                             continue;
                         }
-                    }
-                } else {
-                    match decompress_plain_bin_data(
-                        &storage_name,
-                        data,
-                        crate::model::bin_data::MAX_BIN_DATA_BYTES,
-                    ) {
-                        Some(d) => d,
-                        None => continue,
                     }
                 };
 
@@ -1878,6 +1898,63 @@ fn decompress_plain_bin_data(key: &str, raw: Vec<u8>, max_bytes: usize) -> Optio
     }
 }
 
+/// 비암호 HWP5 BinData를 즉시 로드(상주)하는 경로가 문서 전체로 공유하는 압축 해제 예산.
+///
+/// 항목마다 상한(`MAX_BIN_DATA_BYTES`)만 두면 BIN_DATA 레코드 N개가 같은 폭탄 스트림을
+/// 가리킬 때 N × 상한을 쥘 수 있다. 합계를 `PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES`로 묶고,
+/// 같은 스트림은 한 번만 풀어 `Arc`로 공유한다(예산도 한 번만 쓴다).
+struct PlainBinDataBudget {
+    remaining: usize,
+    /// (스트림 이름, OLE 여부) → 해제 결과. `None`은 상한 초과·실패로 건너뛴 항목이다.
+    decoded: std::collections::HashMap<(String, bool), Option<std::sync::Arc<[u8]>>>,
+}
+
+impl PlainBinDataBudget {
+    fn new() -> Self {
+        Self {
+            remaining: PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES,
+            decoded: std::collections::HashMap::new(),
+        }
+    }
+
+    /// 이미 처리한 스트림이면 결과(건너뜀 포함)를 돌려준다.
+    fn cached(&self, name: &str, is_storage: bool) -> Option<Option<std::sync::Arc<[u8]>>> {
+        self.decoded.get(&(name.to_string(), is_storage)).cloned()
+    }
+
+    /// 항목 상한과 남은 예산 중 작은 쪽을 한도로 풀고, 성공하면 예산을 차감한다.
+    fn decode(
+        &mut self,
+        name: &str,
+        is_storage: bool,
+        raw: Vec<u8>,
+    ) -> Option<std::sync::Arc<[u8]>> {
+        let limit = crate::model::bin_data::MAX_BIN_DATA_BYTES.min(self.remaining);
+        let result = decompress_plain_bin_data(name, raw, limit).and_then(|mut bytes| {
+            // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
+            if is_storage && bytes.len() >= 12 {
+                let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+                if bytes[..8] != cfb_magic && bytes[4..12] == cfb_magic {
+                    bytes.drain(..4);
+                }
+            }
+            // 압축이 아닌 원본 통과분은 limit 검사를 거치지 않으므로 여기서 다시 막는다.
+            if bytes.len() > self.remaining {
+                eprintln!(
+                    "경고: BinData '{}' 가 문서 전체 압축 해제 예산({} 바이트)을 넘어 건너뜀",
+                    name, PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES
+                );
+                return None;
+            }
+            self.remaining -= bytes.len();
+            Some(std::sync::Arc::<[u8]>::from(bytes))
+        });
+        self.decoded
+            .insert((name.to_string(), is_storage), result.clone());
+        result
+    }
+}
+
 impl Hwp5BinResolver {
     /// raw BinData 바이트를 복호화(암호 문서)+압축 해제한다.
     /// 비암호 문서에서 압축 해제 실패 시 원본을 그대로 반환한다(기존 동작).
@@ -2134,6 +2211,7 @@ fn load_bin_data_content(
         };
 
     let mut contents = Vec::new();
+    let mut budget = PlainBinDataBudget::new();
 
     for bd in bin_data_list.iter() {
         // Embedding(이미지)과 Storage(OLE) 로드. Link는 외부 파일 참조이므로 제외
@@ -2179,10 +2257,32 @@ fn load_bin_data_content(
             continue;
         }
 
+        if !encrypted {
+            // 비암호: 문서 전체 예산 + 같은 스트림 1회 해제 (건너뛴 항목은 넣지 않는다)
+            let shared = match budget.cached(&storage_name, is_storage) {
+                Some(hit) => hit,
+                None => match cfb.read_bin_data(&storage_name) {
+                    Ok(data) => budget.decode(&storage_name, is_storage, data),
+                    Err(e) => {
+                        eprintln!("경고: BinData '{}' 로드 실패: {}", storage_name, e);
+                        continue;
+                    }
+                },
+            };
+            if let Some(bytes) = shared {
+                contents.push(BinDataContent {
+                    id: bd.storage_id,
+                    data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                    extension: ext.to_string(),
+                });
+            }
+            continue;
+        }
+
         match cfb.read_bin_data(&storage_name) {
             Ok(data) => {
-                // 암호 문서: 복호화+압축해제. 그 외: 압축 해제 시도 (실패 시 원본).
-                let mut decompressed = if encrypted {
+                // 암호 문서: 복호화+압축해제.
+                let mut decompressed = {
                     let pwd = password.unwrap();
                     match crypto::decrypt_password_protected_limited(
                         &data,
@@ -2198,16 +2298,6 @@ fn load_bin_data_content(
                             );
                             continue;
                         }
-                    }
-                } else {
-                    // 압축 해제 실패 시 원본 사용 (비압축 데이터), 상한 초과 시 건너뜀
-                    match decompress_plain_bin_data(
-                        &storage_name,
-                        data,
-                        crate::model::bin_data::MAX_BIN_DATA_BYTES,
-                    ) {
-                        Some(d) => d,
-                        None => continue,
                     }
                 };
 
@@ -3824,5 +3914,51 @@ mod tests {
             .map(|content| content.data.load().len())
             .unwrap_or(0);
         assert_eq!(loaded, 0, "상한을 넘는 BinData는 비어 있어야 한다");
+    }
+
+    /// 예산: 항목 상한 안이어도 합계가 남은 예산을 넘는 항목은 건너뛰고, 건너뛴 결과도 기억한다.
+    #[test]
+    fn plain_bin_data_budget_caps_total_and_dedups() {
+        let mut budget = PlainBinDataBudget::new();
+        budget.remaining = 100;
+        let a = budget.decode("BIN0001.dat", false, vec![1u8; 60]);
+        assert_eq!(a.as_deref().map(<[u8]>::len), Some(60));
+        // 남은 예산 40 < 60 → 건너뜀
+        assert!(budget.decode("BIN0002.dat", false, vec![2u8; 60]).is_none());
+        // 남은 예산 안이면 통과, 합계는 정확히 소진
+        assert!(budget.decode("BIN0003.dat", false, vec![3u8; 40]).is_some());
+        assert_eq!(budget.remaining, 0);
+        // 같은 스트림은 캐시에서 같은 할당(또는 같은 건너뜀)을 돌려준다
+        let again = budget.cached("BIN0001.dat", false).expect("캐시");
+        assert!(std::sync::Arc::ptr_eq(&a.unwrap(), &again.unwrap()));
+        assert_eq!(budget.cached("BIN0002.dat", false), Some(None));
+        assert!(budget.cached("BIN0009.dat", false).is_none());
+    }
+
+    /// lenient 경로: BIN_DATA N개가 같은 압축 스트림을 가리켜도 한 번만 풀어 한 할당을 공유한다.
+    #[test]
+    fn lenient_duplicate_bin_data_entries_share_one_decompression() {
+        use crate::model::bin_data::{BinData, BinDataCompression, BinDataStatus, BinDataType};
+        let (hwp, storage_id) = bomb_hwp_for_test(8 * 1024 * 1024);
+        let lenient = cfb_reader::LenientCfbReader::open(&hwp).expect("lenient open");
+        let entry = || BinData {
+            raw_data: None,
+            attr: 0x0011,
+            data_type: BinDataType::Embedding,
+            compression: BinDataCompression::Compress,
+            status: BinDataStatus::NotAccessed,
+            abs_path: None,
+            rel_path: None,
+            storage_id,
+            extension: Some("bomb".to_string()),
+        };
+        let list: Vec<_> = (0..16).map(|_| entry()).collect();
+        let contents = load_bin_data_content_lenient(&lenient, &list, false, true, None);
+        assert_eq!(contents.len(), 16);
+        let first = contents[0].data.load_shared();
+        assert_eq!(first.len(), 8 * 1024 * 1024);
+        for c in &contents[1..] {
+            assert!(std::sync::Arc::ptr_eq(&first, &c.data.load_shared()));
+        }
     }
 }
