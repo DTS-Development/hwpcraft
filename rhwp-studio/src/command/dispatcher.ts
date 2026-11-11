@@ -27,6 +27,13 @@ function isBlockedInFormMode(commandId: string, ctx: EditorContext): boolean {
   return FORM_MODE_BLOCKED_PREFIXES.some(prefix => commandId.startsWith(prefix));
 }
 
+/**
+ * 호스트 정책 게이트(PPM host 모드). 'deny' 는 실행하지 않고, 'handled' 는 호스트가 대신 처리했다는 뜻이다.
+ * 게이트가 없으면(기본 빌드) 동작은 그대로다.
+ */
+export type CommandGateResult = 'allow' | 'deny' | 'handled';
+export type CommandGate = (commandId: string) => CommandGateResult;
+
 /** 통합 커맨드 디스패처: 메뉴/툴바/키보드 모든 입력의 단일 실행 경로 */
 export class CommandDispatcher {
   constructor(
@@ -34,6 +41,13 @@ export class CommandDispatcher {
     private services: CommandServices,
     private eventBus: EventBus,
   ) {}
+
+  private gate: CommandGate | null = null;
+
+  /** 호스트 정책 게이트를 건다. dispatch 와 isEnabled 가 모두 이 게이트를 지난다. */
+  setGate(gate: CommandGate | null): void {
+    this.gate = gate;
+  }
 
   /**
    * 커맨드 실행.
@@ -55,6 +69,10 @@ export class CommandDispatcher {
       console.warn(`[CommandDispatcher] 미등록 커맨드: ${commandId}`);
       return { ok: false, reason: 'unregistered' };
     }
+
+    const gated = this.gate?.(commandId) ?? 'allow';
+    if (gated === 'deny') return { ok: false, reason: 'disabled' };
+    if (gated === 'handled') return { ok: true };
 
     const ctx = this.services.getContext();
     if (isBlockedInFormMode(commandId, ctx)) {
@@ -83,6 +101,7 @@ export class CommandDispatcher {
   isEnabled(commandId: string): boolean {
     const def = this.registry.get(commandId);
     if (!def) return false;
+    if (this.gate?.(commandId) === 'deny') return false;
     const ctx = this.services.getContext();
     if (isBlockedInFormMode(commandId, ctx)) return false;
     if (!def.canExecute) return true;

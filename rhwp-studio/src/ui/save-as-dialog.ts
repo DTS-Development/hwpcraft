@@ -5,6 +5,7 @@
  * 이미 보호된 문서는 기본 확인이 암호를 계승하고, 평문은 명시적 선택만 허용한다 (#5991).
  * showSaveAs() 헬퍼로 간단히 사용 가능.
  */
+import { PPM_HOST } from '../ppm/host-mode.ts';
 import { ModalDialog } from './dialog';
 import { fileNameForFormat, type SaveFormat } from '@/command/save-target';
 
@@ -159,7 +160,8 @@ export function showSaveAs(
   return new SaveAsDialog(
     defaultName,
     format,
-    options.allowPassword === true,
-    options.inheritPassword === true,
+    // PPM host: 암호 설정은 막는다(부모가 암호 문서를 열 수 없다).
+    options.allowPassword === true && !PPM_HOST,
+    options.inheritPassword === true && !PPM_HOST,
   ).showAsync();
 }

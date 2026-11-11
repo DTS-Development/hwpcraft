@@ -9,6 +9,7 @@ import { HostFontSource, type HostFontProvider, type HostFontReference, type Hos
 import { normalizeFontFaceData } from './sfnt-face.ts';
 import { REGISTERED_FONTS } from './font-loader.ts';
 import { setRawCanvasFont } from './canvas-font-raw.ts';
+import { PPM_HOST } from '../ppm/host-mode.ts';
 
 /** queryLocalFonts 반환 타입 (DOM 표준 미포함) */
 interface FontData {
@@ -152,11 +153,14 @@ let catalogGeneration = 0;
 
 /** Local Font Access API 지원 여부 */
 export function isLocalFontAccessSupported(): boolean {
+  // PPM host: 사용자 PC 글꼴은 쓰지 않는다(관리자 글꼴만).
+  if (PPM_HOST) return false;
   return typeof (globalThis as LocalFontGlobal).queryLocalFonts === 'function';
 }
 
 /** 문서 후보 글꼴 단위의 fallback probe 지원 여부 */
 export function isFontPresenceProbeSupported(): boolean {
+  if (PPM_HOST) return false;
   try {
     const documentLike = (globalThis as LocalFontGlobal).document;
     const canvas = documentLike?.createElement?.('canvas') as {
@@ -906,6 +910,8 @@ async function removeStoredSnapshot(): Promise<void> {
  * 이 함수는 queryLocalFonts()를 호출하지 않는다.
  */
 export async function loadStoredLocalFonts(): Promise<LocalFontSnapshot | null> {
+  // PPM host: 저장된 로컬 글꼴 결과도 읽지 않는다.
+  if (PPM_HOST) { storageLoaded = true; return null; }
   const snapshot = await readStoredSnapshot();
   cacheLocalFontSnapshot(snapshot);
   storageLoaded = true;
@@ -931,6 +937,7 @@ export async function clearStoredLocalFonts(): Promise<void> {
  * - 캐시/저장소 결과가 있으면 권한 프롬프트 없이 즉시 반환
  */
 export async function detectLocalFonts(options: DetectLocalFontsOptions = {}): Promise<string[]> {
+  if (PPM_HOST) return [];
   const generation = catalogGeneration;
   if (!options.force) {
     if (cachedSnapshot) return getLocalFonts({ includeRegistered: options.includeRegistered });

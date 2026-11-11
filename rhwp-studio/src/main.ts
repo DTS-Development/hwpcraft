@@ -1,4 +1,4 @@
-import { setLinkHostHandler } from './core/link-navigation';
+import { setLinkHostHandler, setExternalLinkBlocked } from './core/link-navigation';
 import { RecoveryCipher, sameRecoveryDraft } from './recovery/recovery-crypto';
 import { setFormActionsEnabled } from './core/form-action-policy';
 import { isPdfInput, type PdfInputSource } from './core/pdf-open';
@@ -115,6 +115,9 @@ import { CENTER_ZOOM_ANCHOR } from '@/view/zoom-anchor';
 import { withBusyCursor } from '@/view/busy-cursor';
 import { formatPageIndicator } from '@/view/page-indicator';
 import { installEmbedRuntime } from '@/embed/runtime';
+import { PPM_HOST } from '@/ppm/host-mode';
+import { LOCKED_COMMAND_IDS as PPM_HOST_LOCKED_FILE_COMMAND_IDS } from '@/ppm/command-policy';
+import { installPpmHost } from '@/ppm/host-install';
 import { subscribeFieldChanges } from '@/embed/field-events';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import { enrichFontDecisionTrace } from '@/core/font-decision-trace';
@@ -143,7 +146,8 @@ documentState.installBeforeUnload(window);
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   // No plaintext persistence: protected documents need a session-only recovery key.
-  isRecoveryBlocked: () => wasm.requiresPasswordForSave && !wasm.recoveryCipher,
+  // PPM host: 문서는 부모가 보관하므로 브라우저에 복구본을 남기지 않는다.
+  isRecoveryBlocked: () => PPM_HOST || (wasm.requiresPasswordForSave && !wasm.recoveryCipher),
   protectDraft: async draft => {
     if (!wasm.requiresPasswordForSave) return draft;
     const cipher = wasm.recoveryCipher;
@@ -249,7 +253,8 @@ async function startDevelopmentRenderRuntime(): Promise<void> {
 // 문서 수명주기(열기/저장)를 호스트가 소유하는 임베드 구성용 opt-in 스위치.
 // 파라미터가 없거나 미지원 값이면 full — 기존 표면 그대로다.
 const chromeModeRequest = resolveChromeModeRequest(window.location.search);
-const chromeMode = chromeModeRequest.mode;
+// PPM host 빌드는 항상 embed 와 같은 표면(문서 출입은 부모가 소유)에서 시작한다.
+const chromeMode = PPM_HOST ? 'embed' : chromeModeRequest.mode;
 if (chromeModeRequest.unsupportedReason) {
   console.warn(
     `[main] 지원하지 않는 chrome 값입니다: ${chromeModeRequest.requested}; full 프로파일을 사용합니다.`,
@@ -403,14 +408,18 @@ const plugins = new PluginHostRegistry({
 // preventDefault로 계속 삼켜져 브라우저 저장/인쇄 대화상자로 빠지지 않는다.
 // Ctrl+Shift+S의 셀 블록 문맥 라우터도 Save As가 미등록이면 이벤트만 소비하므로
 // table:block-sum으로 폴스루하지 않는다. 미등록 커맨드 dispatch는 무해하게 false를 반환한다.
+// PPM host: 저장·내보내기·인쇄·문서 비교는 등록해 두고 정책 게이트가 켜고 끈다.
+// 열기·새 문서·최근 문서만 등록하지 않는다.
+const hiddenFileCommandIds = PPM_HOST ? PPM_HOST_LOCKED_FILE_COMMAND_IDS : EMBED_HIDDEN_FILE_COMMAND_IDS;
+const hiddenEditCommandIds = PPM_HOST ? [] : EMBED_HIDDEN_EDIT_COMMAND_IDS;
 registry.registerAll(
   chromeMode === 'embed'
-    ? fileCommands.filter((cmd) => !EMBED_HIDDEN_FILE_COMMAND_IDS.includes(cmd.id))
+    ? fileCommands.filter((cmd) => !hiddenFileCommandIds.includes(cmd.id))
     : fileCommands,
 );
 registry.registerAll(
   chromeMode === 'embed'
-    ? editCommands.filter((cmd) => !EMBED_HIDDEN_EDIT_COMMAND_IDS.includes(cmd.id))
+    ? editCommands.filter((cmd) => !hiddenEditCommandIds.includes(cmd.id))
     : editCommands,
 );
 registry.registerAll(viewCommands);
@@ -430,7 +439,7 @@ registry.registerAll(toolCommands);
  * setupFileInput이 존재를 전제한다.
  */
 function pruneEmbedChrome(): void {
-  for (const id of [...EMBED_HIDDEN_FILE_COMMAND_IDS, ...EMBED_HIDDEN_EDIT_COMMAND_IDS]) {
+  for (const id of [...hiddenFileCommandIds, ...hiddenEditCommandIds]) {
     document.querySelectorAll(`[data-cmd="${id}"]`).forEach((item) => item.remove());
   }
   const dropdown = document.querySelector('.menu-item[data-menu="file"] .menu-dropdown');
@@ -467,6 +476,7 @@ let autosaveStatusRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 let autosavePreviousMessage: string | null = null;
 
 function autosaveScheduleFromUserSettings(): AutosaveScheduleSettings {
+  if (PPM_HOST) return { recoveryEnabled: false, recoveryIntervalMs: 60_000, idleEnabled: false, idleDelayMs: 1_000 };
   const settings = userSettings.getAutosaveSettings();
   return {
     recoveryEnabled: settings.recoveryEnabled,
@@ -2088,6 +2098,8 @@ eventBus.on('chart-data-edit-request', () => {
  * Chrome 확장 프로그램에서 뷰어 탭을 열 때 사용.
  */
 async function loadFromUrlParam(): Promise<void> {
+  // PPM host: 주소로 문서를 가져오지 않는다(네트워크 요청 0건, 열기는 부모만).
+  if (PPM_HOST) return;
   const params = new URLSearchParams(window.location.search);
   const fileUrl = params.get('url');
   if (!fileUrl) return;
@@ -2225,7 +2237,7 @@ void initPromise.then(() => {
   }
 });
 
-installEmbedRuntime({
+if (!PPM_HOST) installEmbedRuntime({
   hostWindow: window,
   parentWindow: window.parent,
   subscribeCommandError: (listener) => eventBus.on('command-error', listener),
@@ -2363,3 +2375,20 @@ installEmbedRuntime({
     async chromeSet(next) { return setChromeVisibility(next as Partial<ChromeVisibility>); },
   },
 });
+
+// PPM host: 부모 창(craft-bridge)과 `hwpcraft:*` 메시지로 연결한다. embed RPC 는 설치하지 않는다.
+if (PPM_HOST) {
+  installPpmHost({
+    dispatcher,
+    knownCommandIds: () => registry.getAllIds(),
+    eventBus,
+    wasm,
+    initPromise,
+    loadDocument: async (name, bytes) => {
+      await loadBytes(bytes, name, null, undefined, { suppressDialogs: true, skipRecent: true });
+    },
+    markSaved: (name) => completeHostSave(name),
+    setFontProvider: (provider) => setHostFontProvider(provider),
+    setExternalLinkBlocked,
+  });
+}

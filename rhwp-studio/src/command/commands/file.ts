@@ -1,4 +1,5 @@
 import { RecoveryCipher } from '../../recovery/recovery-crypto';
+import { PPM_HOST } from '../../ppm/host-mode.ts';
 import type { CommandDef, CommandServices } from '../types';
 import {
   buildHtmlExportFile,
@@ -157,6 +158,10 @@ function createSavePayload(
       requirePasswordSaveFormat(format),
       password,
     );
+  // PPM host: 내용 손실 보고가 있으면 저장하지 않는다(부모 저장 경로와 같은 규칙).
+  if (PPM_HOST && artifact.contentLoss && artifact.contentLoss.count > 0) {
+    throw new Error(`저장하면 문서 내용 ${artifact.contentLoss.count}건이 사라져 저장을 거절했습니다 (content-loss)`);
+  }
   return {
     blob: new Blob([artifact.bytes as unknown as BlobPart], {
       type: SAVE_FORMAT_DETAILS[format].mimeType,

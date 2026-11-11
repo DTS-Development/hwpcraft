@@ -1,4 +1,5 @@
 import { webHyperlinkUrl } from '@/core/hyperlink';
+import { isExternalLinkBlocked } from '@/core/link-navigation';
 import { ModalDialog } from './dialog';
 import './hyperlink-dialog.css';
 
@@ -83,6 +84,7 @@ export class HyperlinkDialog extends ModalDialog {
     this.previewButton.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18M5 7h14M5 17h14"/></svg>';
     this.previewButton.addEventListener('click', () => {
       try {
+        if (isExternalLinkBlocked()) throw new Error('외부 링크 열기가 차단되어 있습니다.');
         const url = webHyperlinkUrl(this.uriInput.value);
         if (!url) throw new Error('http:// 또는 https://로 시작하는 웹 주소를 입력해 주세요.');
         const opened = window.open('about:blank', '_blank');
