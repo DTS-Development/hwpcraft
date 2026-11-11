@@ -78,7 +78,30 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer as ArrayBuffer;
 }
 
-const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).slice(0, 200);
+/**
+ * 부모로 보내는 오류는 고정된 이유 코드와 짧은 문구뿐이다. 예외 원문(경로·스택 조각이 섞일 수 있다)은
+ * 부모로 보내지 않고 편집기 콘솔에만 남긴다.
+ */
+const REASON_TEXT = {
+  'password-protected': '암호가 걸린 문서는 저장할 수 없습니다',
+  'unsupported-format': '저장할 수 없는 형식입니다',
+  'export-failed': '문서를 저장 형식으로 만들지 못했습니다',
+  'open-failed': '문서를 열지 못했습니다',
+  'init-failed': '편집기를 시작하지 못했습니다',
+} as const;
+type ReasonCode = keyof typeof REASON_TEXT;
+
+/** 내보내기 예외를 이유 코드로 바꾼다. 우리가 던지는 알려진 코드만 통과하고 나머지는 export-failed. */
+function exportReason(e: unknown): ReasonCode {
+  console.error('[hwpcraft] 내보내기 실패', e);
+  const m = e instanceof Error ? e.message : '';
+  return m === 'password-protected' || m === 'unsupported-format' ? m : 'export-failed';
+}
+
+/** failed 이벤트 문구: `<단계>: <코드> (<문구>)`. 단계 접두(open·save·init)는 기존과 같다. */
+export function failureText(stage: 'open' | 'save' | 'init', code: ReasonCode): string {
+  return `${stage}: ${code} (${REASON_TEXT[code]})`;
+}
 
 export function createHostBridge(deps: HostBridgeDeps) {
   // open·bytes 요청이 서로 겹치지 않게 순서대로 처리한다.
@@ -107,7 +130,8 @@ export function createHostBridge(deps: HostBridgeDeps) {
       await deps.openDocument(name, bytes);
       opened = { name, format: openFormat };
     } catch (e) {
-      fail(`open: ${errText(e)}`);
+      console.error('[hwpcraft] 문서 열기 실패', e);
+      fail(failureText('open', 'open-failed'));
     }
   }
 
@@ -128,7 +152,7 @@ export function createHostBridge(deps: HostBridgeDeps) {
     try {
       snap = deps.exportCurrent();
     } catch (e) {
-      return reject(errText(e));
+      return reject(exportReason(e));
     }
     // 손실 보고가 있으면 거절한다(저장·검사 모두 같은 바이트를 쓰므로 목적과 무관).
     if (snap.lossCount > 0) {
@@ -172,8 +196,8 @@ export function createHostBridge(deps: HostBridgeDeps) {
     try {
       snap = deps.exportCurrent();
     } catch (e) {
-      const reason = errText(e);
-      fail(`save: ${reason}`);
+      const reason = exportReason(e);
+      fail(failureText('save', reason));
       return { ok: false, reason };
     }
     if (snap.lossCount > 0) {
@@ -209,7 +233,11 @@ export function createHostBridge(deps: HostBridgeDeps) {
     },
     sendReady(): void { deps.post({ type: `${PREFIX}:ready` }); },
     sendDirty(dirty: boolean): void { deps.post({ type: `${PREFIX}:dirty`, dirty }); },
-    sendFailed(error: string): void { fail(error.slice(0, 200)); },
+    /** 시작(wasm 초기화) 실패. 원문은 콘솔에만 남긴다. */
+    sendInitFailed(e: unknown): void {
+      console.error('[hwpcraft] 편집기 시작 실패', e);
+      fail(failureText('init', 'init-failed'));
+    },
     /** 사용자가 파일 > 저장을 눌렀을 때. 손실이 있으면 거절하고 이유를 부모에 알린다. */
     saveFromUser(): Promise<{ ok: true } | { ok: false; reason: string }> {
       // open·request-bytes 와 같은 순서 큐에 넣어, 문서가 바뀌는 중에 내보내지 않게 한다.

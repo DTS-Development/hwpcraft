@@ -119,7 +119,7 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
 
   opts.initPromise.then(
     () => bridge.sendReady(),
-    (e) => bridge.sendFailed(`init: ${e instanceof Error ? e.message : String(e)}`),
+    (e) => bridge.sendInitFailed(e),
   );
   return true;
 }
