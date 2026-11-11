@@ -55,6 +55,11 @@ test('open: PDF·빈 바이트는 failed', async () => {
   await tick();
   assert.equal(posted.length, 2);
   assert.ok(posted.every((p) => p.type === 'hwpcraft:failed'));
+  assert.deepEqual(posted.map((p) => p.error), [
+    'open: unsupported-format (HWP·HWPX 파일만 다룰 수 있습니다)',
+    'open: invalid-bytes (문서 바이트가 비어 있거나 형식이 틀립니다)',
+  ]);
+  for (const p of posted) assert.match(String(p.error), /^(open|save|init): [a-z-]+ \(.+\)$/);
   assert.deepEqual(calls, []);
 });
 
@@ -62,7 +67,35 @@ test('open 실패는 failed 로 알린다', async () => {
   const { bridge, posted } = setup({ openDocument: async () => { throw new Error('boom'); } });
   bridge.handle({ type: 'hwpcraft:open', name: 'x.hwp', bytes: OLE });
   await tick();
-  assert.equal(posted[0].error, 'open: boom');
+  assert.equal(posted[0].error, 'open: open-failed (문서를 열지 못했습니다)');
+});
+
+// 예외 원문(경로·스택 조각)은 어떤 오류 경로로도 부모에 가지 않는다.
+const LEAKY = '/Users/kim/secret/a.hwp at parse (/srv/app/wasm.js:10:5)';
+const noLeak = (o: unknown) => assert.ok(!/Users|secret|\/srv|\.js|at parse/.test(JSON.stringify(o)), JSON.stringify(o));
+
+test('오류 문자열: open·export·save·init 실패에 경로·스택이 섞이지 않는다', async () => {
+  const a = setup({ openDocument: async () => { throw new Error(LEAKY); } });
+  a.bridge.handle({ type: 'hwpcraft:open', name: 'x.hwp', bytes: OLE });
+  await tick();
+  noLeak(a.posted);
+  const b = setup({ exportCurrent: () => { throw new Error(LEAKY); } });
+  b.bridge.handle({ type: 'hwpcraft:request-bytes', id: 'r-1', purpose: 'save' });
+  await tick();
+  assert.equal(b.posted[0].reason, 'export-failed');
+  const saved = await b.bridge.saveFromUser();
+  assert.deepEqual(saved, { ok: false, reason: 'export-failed' });
+  assert.equal(b.posted[1].error, 'save: export-failed (문서를 저장 형식으로 만들지 못했습니다)');
+  noLeak(b.posted);
+  const c = setup();
+  c.bridge.sendInitFailed(new Error(LEAKY));
+  assert.equal(c.posted[0].error, 'init: init-failed (편집기를 시작하지 못했습니다)');
+  noLeak(c.posted);
+});
+
+test('알려진 이유 코드(password-protected 등)는 그대로 전달한다', async () => {
+  const { bridge } = setup({ exportCurrent: () => { throw new Error('unsupported-format'); } });
+  assert.deepEqual(await bridge.saveFromUser(), { ok: false, reason: 'unsupported-format' });
 });
 
 test('request-bytes save: bytes 를 보내고 깨끗하게 만든다(열 때 형식, 확장자 보정)', async () => {

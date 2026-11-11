@@ -44,6 +44,10 @@ if grep -rlq "api.anthropic.com\|generativelanguage.googleapis.com\|api.openai.c
   exit 1
 fi
 
+# 3-1) 진입 HTML 전부에 CSP meta (host 빌드에만. 외부 출처 요청을 브라우저가 막는다)
+node "$root/ppm/inject-csp.mjs" "$out"
+node "$root/ppm/inject-csp.mjs" --check "$out"
+
 # 4) 배포에 필요 없는 것을 뺀다: 샘플 문서, 예비 wasm glue(public 복사본), 타입 선언.
 #    wasm 은 assets/ 의 해시 파일 하나만 쓴다.
 rm -rf "$out/samples"
