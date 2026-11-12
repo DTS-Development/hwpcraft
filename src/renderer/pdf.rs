@@ -2104,7 +2104,9 @@ fn pdf_image_href_resolver() -> usvg::ImageHrefResolver<'static> {
             },
             _ => default_data(mime, data, opts),
         }),
-        resolve_string: usvg::ImageHrefResolver::default_string_resolver(),
+        // 문서(하위 SVG 포함)가 가리키는 파일 경로는 읽지 않는다. usvg 기본 해석기는 href 를
+        // 서버 로컬 경로로 열어 PNG·JPEG·SVG 를 PDF 에 넣으므로(S2) 빈 그림으로 처리한다.
+        resolve_string: Box::new(|_, _| None),
     }
 }
 
@@ -2947,5 +2949,69 @@ endbfchar <DB80DEB1>";
         .unwrap();
         assert!(pdf.windows(9).any(|window| window == b"/Width 64"));
         assert!(pdf.windows(10).any(|window| window == b"/Height 32"));
+    }
+
+    // S2: 문서가 가리키는 파일 경로는 PDF 변환이 읽지 않고, 안에 든 data: 그림은 그대로 넣는다.
+    const REF_TEST_PNG_BASE64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP4z8DAwPAfAAcAAf9+CLHQAAAAAElFTkSuQmCC";
+
+    fn image_xobject_count(pdf: &[u8]) -> usize {
+        String::from_utf8_lossy(pdf)
+            .matches("/Subtype /Image")
+            .count()
+    }
+
+    /// 시험용 PNG 파일을 임시 폴더에 쓰고 경로를 돌려준다. 호출한 시험이 지운다.
+    fn write_ref_test_png(tag: &str) -> std::path::PathBuf {
+        use base64::Engine;
+        let path = std::env::temp_dir().join(format!(
+            "rhwp-pdf-ref-{tag}-{}.png",
+            std::process::id()
+        ));
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(REF_TEST_PNG_BASE64)
+            .unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn pdf_does_not_read_local_file_href() {
+        let path = write_ref_test_png("page");
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="{}" width="100" height="50"/></svg>"#,
+            path.display()
+        );
+        let pdf = svgs_to_pdf(&[svg]);
+        let _ = std::fs::remove_file(&path);
+        let pdf = pdf.unwrap();
+        assert_eq!(image_xobject_count(&pdf), 0, "파일 경로 그림이 PDF 에 들어갔다");
+    }
+
+    #[test]
+    fn pdf_does_not_read_local_file_href_inside_sub_svg() {
+        use base64::Engine;
+        let path = write_ref_test_png("sub");
+        let sub = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"><image href="{}" width="4" height="2"/></svg>"#,
+            path.display()
+        );
+        let sub_b64 = base64::engine::general_purpose::STANDARD.encode(sub.as_bytes());
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="data:image/svg+xml;base64,{sub_b64}" width="120" height="60"/></svg>"#
+        );
+        let pdf = svgs_to_pdf(&[svg]);
+        let _ = std::fs::remove_file(&path);
+        let pdf = pdf.unwrap();
+        assert_eq!(image_xobject_count(&pdf), 0, "하위 SVG 의 파일 경로 그림이 PDF 에 들어갔다");
+    }
+
+    #[test]
+    fn pdf_keeps_data_uri_image() {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100"><image href="data:image/png;base64,{REF_TEST_PNG_BASE64}" width="100" height="50"/></svg>"#
+        );
+        let pdf = svgs_to_pdf(&[svg]).unwrap();
+        assert_eq!(image_xobject_count(&pdf), 1, "data: 그림이 빠졌다");
     }
 }
