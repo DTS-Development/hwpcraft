@@ -1232,6 +1232,49 @@ pub fn decompressed_len_capped(data: &[u8], cap: usize) -> Result<usize, CfbErro
     }
 }
 
+/// 압축 해제 결과(정확히 `len` 바이트)에서 선두 `skip` 바이트를 버린 나머지를
+/// 처음부터 공유 버퍼(`Arc<[u8]>`)에 직접 쓴다.
+///
+/// `Vec`로 푼 뒤 `Arc::from`으로 옮기면 순간적으로 두 배를 쥐므로, `decompressed_len_capped`로
+/// 잰 길이를 받아 한 번에 할당하고 그 안에 푼다. 디코더 시도 순서(raw deflate → zlib)는
+/// `decompress_stream_limited` 와 같고, 결과 길이가 `len`과 다르면 그 디코더는 실패로 본다.
+pub fn decompress_stream_exact_shared(
+    data: &[u8],
+    len: usize,
+    skip: usize,
+) -> Result<std::sync::Arc<[u8]>, CfbError> {
+    fn fill<R: Read>(
+        mut reader: R,
+        len: usize,
+        skip: usize,
+    ) -> Result<std::sync::Arc<[u8]>, CfbError> {
+        let map_err = |error: std::io::Error| CfbError::DecompressError(error.to_string());
+        let kept = len
+            .checked_sub(skip)
+            .ok_or_else(|| CfbError::DecompressError("건너뛸 길이가 결과보다 길다".to_string()))?;
+        let mut head = vec![0u8; skip];
+        reader.read_exact(&mut head).map_err(map_err)?;
+        let mut buf = std::sync::Arc::<[u8]>::new_zeroed_slice(kept);
+        // SAFETY: 방금 만든 Arc라 참조가 하나뿐이고, 0으로 채웠으므로 u8로 초기화돼 있다.
+        let mut buf = unsafe { buf.assume_init() };
+        let out = std::sync::Arc::get_mut(&mut buf).expect("새 Arc는 단독 소유");
+        reader.read_exact(out).map_err(map_err)?;
+        // 길이가 더 남아 있으면 잰 길이와 다른 스트림이다.
+        let mut extra = [0u8; 1];
+        if reader.read(&mut extra).map_err(map_err)? != 0 {
+            return Err(CfbError::DecompressError(
+                "압축 해제 길이 불일치".to_string(),
+            ));
+        }
+        Ok(buf)
+    }
+
+    match fill(flate2::read::DeflateDecoder::new(data), len, skip) {
+        Ok(buf) => Ok(buf),
+        Err(_) => fill(flate2::read::ZlibDecoder::new(data), len, skip),
+    }
+}
+
 /// 압축 해제 결과의 **선두 `n` 바이트까지만** 얻는다. 이후가 더 있어도 오류가 아니다.
 ///
 /// [#2550] OLE size prefix 판정(12바이트)이나 빈 항목 판정(1바이트)처럼 아주 짧은
@@ -2052,6 +2095,34 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// 공유 버퍼 직접 해제: raw deflate·zlib 모두 센 길이와 같은 결과를 내고, 길이가 다르면 실패한다.
+    #[test]
+    fn decompress_exact_shared_matches_limited_for_raw_and_zlib() {
+        use flate2::write::{DeflateEncoder, ZlibEncoder};
+        use flate2::Compression;
+        use std::io::Write;
+
+        let payload: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        let mut raw = DeflateEncoder::new(Vec::new(), Compression::default());
+        raw.write_all(&payload).unwrap();
+        let raw = raw.finish().unwrap();
+        let mut zl = ZlibEncoder::new(Vec::new(), Compression::default());
+        zl.write_all(&payload).unwrap();
+        let zl = zl.finish().unwrap();
+
+        for packed in [&raw, &zl] {
+            let len = decompressed_len_capped(packed, usize::MAX / 2).unwrap();
+            assert_eq!(len, payload.len());
+            let shared = decompress_stream_exact_shared(packed, len, 0).unwrap();
+            assert_eq!(&*shared, payload.as_slice());
+            let skipped = decompress_stream_exact_shared(packed, len, 4).unwrap();
+            assert_eq!(&*skipped, &payload[4..]);
+            assert!(decompress_stream_exact_shared(packed, len - 1, 0).is_err());
+            assert!(decompress_stream_exact_shared(packed, len + 1, 0).is_err());
+            assert!(decompress_stream_exact_shared(packed, 2, 4).is_err());
         }
     }
 }
