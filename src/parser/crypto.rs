@@ -130,6 +130,7 @@ pub fn decrypt_password_stream(raw: &[u8], password: &[u8]) -> Vec<u8> {
     crate::password_crypto::decrypt_hwp5_stream(raw, password)
 }
 
+/// 압축 해제 상한이 없다. 신뢰할 수 없는 입력에는 [`decrypt_password_protected_limited`]를 쓴다.
 pub fn decrypt_password_protected(
     raw: &[u8],
     password: &[u8],
@@ -170,6 +171,7 @@ pub(super) fn encrypt_password_stream_for_test(raw: &[u8], password: &[u8]) -> V
 }
 
 /// 배포용 ViewText section을 복호화한다.
+/// 압축 해제 상한이 없다. 신뢰할 수 없는 입력에는 [`decrypt_viewtext_section_limited`]를 쓴다.
 pub fn decrypt_viewtext_section(
     section_data: &[u8],
     compressed: bool,

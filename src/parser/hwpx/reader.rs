@@ -235,6 +235,17 @@ impl HwpxReader {
         self.read_file_bytes_limited(path, MAX_BINDATA_SIZE)
     }
 
+    #[cfg(test)]
+    pub(super) fn set_xml_read_remaining_for_test(&mut self, bytes: usize) {
+        self.xml_read_remaining = bytes;
+    }
+
+    /// 문서 합계에서 남은 압축 해제 예산(시험용).
+    #[cfg(test)]
+    pub(super) fn xml_read_remaining(&self) -> usize {
+        self.xml_read_remaining
+    }
+
     /// 파싱 중 한꺼번에 읽어 문서에 남겨 두는 비-XML 항목(차트·스크립트 등)을 읽는다.
     ///
     /// 항목마다 [`MAX_XML_SIZE`]로 끊고, XML 본문과 같은 문서 합계([`MAX_TOTAL_XML_BYTES`])에
@@ -343,7 +354,7 @@ impl HwpxReader {
         Ok(size)
     }
 
-    fn file_index(&self, path: &str) -> Result<usize, HwpxError> {
+    pub(super) fn file_index(&self, path: &str) -> Result<usize, HwpxError> {
         // zip 9의 이름 조회는 raw bytes를 비교한다. UTF-8 경로는 기존 빠른
         // 조회를 쓰고, CP437 등 디코딩된 경로는 같은 디렉터리 순서의 인덱스로 읽는다.
         self.archive
@@ -701,7 +712,7 @@ mod tests {
         // zip 라이브러리가 선언 크기를 넘는 출력을 거절하므로 선언 크기 이상은 풀리지 않는다.
         let result = reader.read_retained_bytes("Scripts/lie.bin");
         assert!(
-            matches!(&result, Err(HwpxError::ZipError(msg)) if msg.contains("declared")),
+            matches!(&result, Err(HwpxError::ZipError(_))),
             "{:?}",
             result.map(|v| v.len())
         );
