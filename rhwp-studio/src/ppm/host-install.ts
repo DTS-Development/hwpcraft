@@ -6,6 +6,8 @@ import type { CommandGate } from '../command/dispatcher.ts';
 import { isExternalLinkBlockedBy } from './external-link.ts';
 import { isCommandAllowed, sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
 import { createHostBridge, type SaveSnapshot, type HwpFormat } from './host-bridge.ts';
+import { CONTROL_BINDINGS } from './control-commands.ts';
+import { CONTAINER_SELECTOR, PRUNE_ROOTS, SEPARATOR_SELECTOR, TRIGGER_SELECTOR, pruneChrome, type PruneRules } from './menu-prune.ts';
 import { PpmHostFonts } from './host-fonts.ts';
 import { setHostOutput } from './host-output.ts';
 import { isHostConnected, PPM_HOST_MARKER } from './host-mode.ts';
@@ -57,12 +59,34 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   style.setAttribute('data-ppm-host-policy', '');
   document.head.appendChild(style);
 
+  // 정책 대상 조작 요소(data-cmd 또는 대응표 selector)와 그 빈 껍데기를 숨긴다.
+  const HIDE_ATTR = 'data-ppm-hide';
+  const pruneRules: PruneRules<Element> = {
+    leafBlocked: (el) => {
+      const cmd = el.getAttribute('data-cmd');
+      if (cmd) return !isCommandAllowed(cmd, overrides);
+      const bound = boundControls.get(el);
+      return bound === undefined ? null : !isCommandAllowed(bound, overrides);
+    },
+    isContainer: (el) => el.matches(CONTAINER_SELECTOR),
+    isSeparator: (el) => el.matches(SEPARATOR_SELECTOR),
+    isTrigger: (el) => el.matches(TRIGGER_SELECTOR),
+    setHidden: (el, hidden) => { el.toggleAttribute(HIDE_ATTR, hidden); },
+  };
+  let boundControls = new Map<Element, string>();
+
   // 막힌 명령의 메뉴·도구막대 표면을 숨긴다(실행은 게이트가 따로 막는다).
   const refreshHiddenSurfaces = () => {
     const rules = opts.knownCommandIds()
       .filter((id) => !isCommandAllowed(id, overrides) && /^[A-Za-z0-9_.:-]+$/.test(id))
       .map((id) => `[data-cmd="${id}"]{display:none!important}`);
+    rules.push(`[${HIDE_ATTR}]{display:none!important}`);
     style.textContent = rules.join('\n');
+    boundControls = new Map();
+    for (const b of CONTROL_BINDINGS) {
+      for (const el of document.querySelectorAll(b.selector)) boundControls.set(el, b.commandId);
+    }
+    for (const root of document.querySelectorAll(PRUNE_ROOTS)) pruneChrome(root, pruneRules);
   };
 
   const fonts = new PpmHostFonts();

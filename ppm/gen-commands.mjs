@@ -3,6 +3,7 @@
 // 형식(공통): { app, schema: 1, commands: [{ id, label, labelKo, location[], grades: { builder } }] }
 // 편집기의 실제 명령 모듈을 vite SSR 로 읽어 만들고, 등급은 src/ppm/command-policy.ts 표에서 가져온다
 // — 표와 목록이 어긋날 수 없다. 표에 있는 id 가 명령 목록에 없으면 실패한다.
+// 메뉴에 없는 명령(서식 막대·상태 표시줄 등)의 location 은 src/ppm/control-commands.ts 대응표의 표면 이름이다.
 //
 // 사용: node ppm/gen-commands.mjs <rhwp-studio 경로> <출력 파일>
 import { createRequire } from 'node:module';
@@ -49,7 +50,8 @@ async function load(lang) {
     }
     const i18n = await server.ssrLoadModule('/src/i18n/index.ts');
     const policy = await server.ssrLoadModule('/src/ppm/command-policy.ts');
-    return { labels, t: i18n.t, locale: i18n.getLocale(), policy };
+    const controls = await server.ssrLoadModule('/src/ppm/control-commands.ts');
+    return { labels, t: i18n.t, locale: i18n.getLocale(), policy, controls };
   } finally {
     await server.close();
   }
@@ -87,6 +89,23 @@ if (ko.locale !== 'ko' || en.locale !== 'en') {
 }
 const locs = menuLocations(readFileSync(join(studio, 'index.html'), 'utf8'));
 const { NON_DEFAULT_GRADES, gradeOf } = ko.policy;
+// 메뉴에 위치가 없는 명령은 처음 만나는 조작 요소의 표면(도구 상자·서식 막대·상태 표시줄)을 위치로 쓴다:
+// index.html 에서 data-cmd 를 가진 도구 모음 단추, 그다음 대응표(data-cmd 가 없는 요소).
+const surfaceOf = new Map();
+{
+  const html = readFileSync(join(studio, 'index.html'), 'utf8');
+  const regions = [['id="icon-toolbar"', 'toolbox'], ['id="style-bar"', 'format'], ['id="status-bar"', 'status']]
+    .map(([marker, surface]) => [html.indexOf(marker), ko.controls.SURFACE_LABELS[surface]])
+    .filter(([pos]) => pos >= 0)
+    .sort((x, y) => x[0] - y[0]);
+  for (const m of html.matchAll(/data-cmd="([^"]+)"/g)) {
+    const region = regions.filter(([pos]) => pos <= m.index).at(-1);
+    if (region && !surfaceOf.has(m[1])) surfaceOf.set(m[1], region[1]);
+  }
+}
+for (const b of ko.controls.CONTROL_BINDINGS) {
+  if (!surfaceOf.has(b.commandId)) surfaceOf.set(b.commandId, ko.controls.SURFACE_LABELS[b.surface]);
+}
 
 const commands = [];
 for (const [id, labelKo] of ko.labels) {
@@ -95,7 +114,7 @@ for (const [id, labelKo] of ko.labels) {
     id,
     label: String(en.labels.get(id) ?? labelKo),
     labelKo: String(labelKo),
-    location: keys.length ? keys.map((k) => en.t(k)) : ['Other'],
+    location: keys.length ? keys.map((k) => en.t(k)) : surfaceOf.has(id) ? [surfaceOf.get(id)] : ['Other'],
     grades: { builder: gradeOf(id) },
   });
 }
@@ -106,6 +125,11 @@ const ids = new Set(commands.map((c) => c.id));
 const missing = Object.keys(NON_DEFAULT_GRADES).filter((id) => !ids.has(id));
 if (missing.length) {
   console.error(`등급 표에는 있으나 명령 목록에 없는 id: ${missing.join(', ')}`);
+  process.exit(1);
+}
+const unbound = [...new Set(ko.controls.CONTROL_BINDINGS.map((b) => b.commandId))].filter((id) => !ids.has(id));
+if (unbound.length) {
+  console.error(`조작 요소 대응표에는 있으나 명령 목록에 없는 id: ${unbound.join(', ')}`);
   process.exit(1);
 }
 const dup = commands.length - ids.size;

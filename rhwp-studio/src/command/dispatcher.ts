@@ -54,6 +54,15 @@ export class CommandDispatcher {
     this.gate = gate;
   }
 
+  /**
+   * 호스트 정책이 이 명령을 허용하는지만 본다(게이트가 없으면 항상 true).
+   * 명령 정의를 거치지 않고 이벤트를 직접 내보내는 조작 요소(글자 크기·글꼴·색, 확대 가로바 등)가
+   * 실행 직전에 부른다. isEnabled 와 달리 canExecute·양식 모드는 보지 않아 기본 빌드 동작이 그대로다.
+   */
+  isHostAllowed(commandId: string): boolean {
+    return this.gate?.(commandId) !== 'deny';
+  }
+
   private onHandled: ((commandId: string) => void) | null = null;
 
   /**

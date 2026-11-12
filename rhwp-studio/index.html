@@ -423,9 +423,9 @@
       <div id="icon-toolbar-viewport" class="tb-scroll-viewport" role="group" aria-label="기본 도구 상자 명령" tabindex="0" data-i18n-aria-label="ui.iconToolbarViewport.ariaLabel.x772688">
         <div class="tb-scroll-track">
       <div class="tb-group">
-        <button class="tb-btn" title="오려두기 (Ctrl+X)" data-i18n-title="ui.iconToolbarViewport.tooltip.x408313"><span class="tb-sprite icon-cut"></span><span class="tb-label" data-i18n-lines="ui.iconToolbarViewport.toolbarLabel.x05c63e">오려<br/>두기</span></button>
-        <button class="tb-btn" title="복사하기 (Ctrl+C)" data-i18n-title="ui.iconToolbarViewport.tooltip.xfbf194"><span class="tb-sprite icon-copy"></span><span class="tb-label" data-i18n-lines="ui.iconToolbarViewport.toolbarLabel.x06e1ec">복사<br/>하기</span></button>
-        <button class="tb-btn tb-paste" title="붙이기 (Ctrl+V)" data-i18n-title="ui.iconToolbarViewport.tooltip.x0821b2">
+        <button class="tb-btn" id="tb-cut" title="오려두기 (Ctrl+X)" data-i18n-title="ui.iconToolbarViewport.tooltip.x408313"><span class="tb-sprite icon-cut"></span><span class="tb-label" data-i18n-lines="ui.iconToolbarViewport.toolbarLabel.x05c63e">오려<br/>두기</span></button>
+        <button class="tb-btn" id="tb-copy" title="복사하기 (Ctrl+C)" data-i18n-title="ui.iconToolbarViewport.tooltip.xfbf194"><span class="tb-sprite icon-copy"></span><span class="tb-label" data-i18n-lines="ui.iconToolbarViewport.toolbarLabel.x06e1ec">복사<br/>하기</span></button>
+        <button class="tb-btn tb-paste" id="tb-paste" title="붙이기 (Ctrl+V)" data-i18n-title="ui.iconToolbarViewport.tooltip.x0821b2">
           <span class="tb-sprite icon-paste"></span><span class="tb-label" data-i18n="ui.iconToolbarViewport.toolbarLabel.x5d1ad0">붙이기</span>
         </button>
         <button class="tb-btn" data-cmd="edit:format-copy" title="모양 복사 (Alt+C)" data-i18n-title="command.edit.formatCopy.tooltip"><span class="tb-sprite icon-format-copy"></span><span class="tb-label" data-i18n-lines="command.edit.formatCopy.toolbarLabel">모양<br/>복사</span></button>
@@ -528,14 +528,14 @@
       <div class="sb-ribbon-group sb-field-ribbon-group">
         <div class="sb-field-grid">
           <!-- 스타일 -->
-          <span class="sb-field">
+          <span class="sb-field" id="sbf-style">
             <label class="sb-field-label" for="style-name" data-i18n="ui.styleBar.fieldLabel.x9c591b">스타일</label>
             <select id="style-name" class="sb-combo" title="스타일" data-i18n-title="ui.styleName.tooltip">
               <option value="0" data-i18n="ui.styleName.option.0">바탕글</option>
             </select>
           </span>
           <!-- 글꼴 언어 카테고리 -->
-          <span class="sb-field">
+          <span class="sb-field" id="sbf-lang">
             <label class="sb-field-label" for="font-lang" data-i18n="ui.styleBar.fieldLabel.xbf869c">언어</label>
             <select id="font-lang" class="sb-combo sb-font-lang" title="글꼴 적용 언어" data-i18n-title="ui.fontLang.tooltip">
               <option value="all" data-i18n="ui.fontLang.option.all">대표</option>
@@ -549,7 +549,7 @@
             </select>
           </span>
           <!-- 글꼴 -->
-          <span class="sb-field">
+          <span class="sb-field" id="sbf-font">
             <label class="sb-field-label" for="font-name" data-i18n="ui.styleBar.fieldLabel.x7c16df">글꼴</label>
             <select id="font-name" class="sb-combo sb-font" title="글꼴" data-i18n-title="ui.fontName.tooltip">
               <option value="함초롬바탕">함초롬바탕</option>
@@ -562,7 +562,7 @@
             </select>
           </span>
           <!-- 글자 크기 -->
-          <span class="sb-field">
+          <span class="sb-field" id="sbf-size">
             <label class="sb-field-label" for="font-size" data-i18n="ui.styleBar.fieldLabel.x76905b">크기</label>
             <span class="sb-size-group">
               <input id="font-size" type="text" class="sb-size" title="글자 크기 (pt)" value="10.0" data-i18n-title="ui.fontSize.tooltip" />
@@ -574,7 +574,7 @@
             </span>
           </span>
           <!-- 줄 간격 -->
-          <span class="sb-field">
+          <span class="sb-field" id="sbf-linespacing">
             <label class="sb-field-label" for="linespacing-select" data-i18n="ui.styleBar.fieldLabel.xb3e0f6">줄 간격</label>
             <span class="sb-ls-group" id="linespacing-group">
               <select id="linespacing-select" class="sb-ls-select" title="줄 간격" data-i18n-title="ui.linespacingSelect.tooltip">
@@ -622,7 +622,7 @@
           <div class="sb-ribbon-group sb-color-ribbon-group">
             <div class="sb-command-group sb-color-group">
               <!-- 글자색 -->
-              <span class="sb-color-wrap">
+              <span class="sb-color-wrap" id="sb-color-wrap">
                 <button id="btn-text-color" class="sb-btn sb-has-arrow" title="글자 색" data-i18n-title="ui.btnTextColor.tooltip">
                   <span class="sb-color-visual"><span class="sb-ga" data-i18n="ui.btnTextColor.sample">가</span><span id="color-bar"></span></span>
                   <span class="sb-dd">▾</span>
@@ -692,7 +692,7 @@
         <button id="sb-zoom-fit-width" class="stb-icon-btn" title="폭 맞춤" data-i18n-title="ui.sbZoomFitWidth.tooltip"><span class="tb-sprite icon-zoom-fit-width"></span></button>
         <button id="sb-zoom-fit" class="stb-icon-btn" title="쪽 맞춤" data-i18n-title="ui.sbZoomFit.tooltip"><span class="tb-sprite icon-zoom-fit"></span></button>
         <button id="sb-zoom-out" class="stb-icon-btn" title="축소" data-i18n-title="ui.sbZoomOut.tooltip"><span class="tb-sprite icon-zoom-out"></span></button>
-        <span class="stb-zoom-range-wrap">
+        <span class="stb-zoom-range-wrap" id="sb-zoom-range-wrap">
           <input id="sb-zoom-range" class="stb-zoom-range" type="range" min="0" max="1000" step="1" value="500" aria-label="화면 확대/축소 배율" aria-valuetext="100%" data-i18n-aria-label="ui.sbZoomRange.ariaLabel">
           <span class="stb-zoom-neutral-mark" aria-hidden="true"></span>
         </span>
