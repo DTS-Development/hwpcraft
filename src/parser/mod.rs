@@ -123,8 +123,10 @@ impl DocumentOpenDecompressionPolicy {
 /// BinData는 DocInfo/BodyText 문서 열기 누적 예산에는 포함하지 않지만, 해당 소비 경로가
 /// crypto helper에 명시적으로 전달하는 parser 소유 정책이다.
 const MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES: usize = 512 * 1024 * 1024;
-/// 비암호 BinData를 즉시 로드하는 경로의 문서 전체 압축 해제 합계 상한.
+/// BinData를 즉시 로드(상주)하는 경로의 문서 전체 합계 상한(압축 해제분과, 압축이 아닌 원본 통과분 포함).
 /// 항목 상한(`MAX_BIN_DATA_BYTES`, 256MiB)의 2배로, 암호 문서의 항목 상한과 같은 값이다.
+/// 적용 범위는 즉시 로드 경로(lenient CFB, 지연 로딩 리졸버 생성 실패 폴백)이며,
+/// 기본 지연 로딩 경로는 요청 때마다 항목 상한만 쓴다.
 const PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 
 #[cfg(test)]
@@ -1215,6 +1217,18 @@ fn load_bin_data_content_lenient(
             continue;
         }
 
+        // 암호 문서도 같은 합계 예산·중복 제거를 쓴다(비암호 분기와 같은 규칙).
+        if let Some(hit) = budget.cached(&storage_name, is_storage) {
+            if let Some(bytes) = hit {
+                contents.push(BinDataContent {
+                    id: bd.storage_id,
+                    data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                    extension: ext.to_string(),
+                });
+            }
+            continue;
+        }
+
         match lenient.read_stream(&format!("/BinData/{}", storage_name)) {
             Ok(data) => {
                 let mut decompressed = {
@@ -1223,7 +1237,7 @@ fn load_bin_data_content_lenient(
                         &data,
                         pwd,
                         stream_compressed,
-                        MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES,
+                        MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES.min(budget.remaining),
                     ) {
                         Ok(d) => d,
                         Err(e) => {
@@ -1231,24 +1245,25 @@ fn load_bin_data_content_lenient(
                                 "경고: BinData '{}' 복호화 실패 (lenient): {}",
                                 storage_name, e
                             );
+                            budget.finish(&storage_name, is_storage, None);
                             continue;
                         }
                     }
                 };
 
                 // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
-                if is_storage && decompressed.len() >= 12 {
-                    let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-                    if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
-                        decompressed.drain(..4);
-                    }
+                if is_storage {
+                    decompressed.drain(..ole_size_prefix_len(&decompressed));
                 }
 
-                contents.push(BinDataContent {
-                    id: bd.storage_id,
-                    data: decompressed.into(),
-                    extension: ext.to_string(),
-                });
+                if let Some(bytes) = budget.admit_decrypted(&storage_name, is_storage, decompressed)
+                {
+                    contents.push(BinDataContent {
+                        id: bd.storage_id,
+                        data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                        extension: ext.to_string(),
+                    });
+                }
             }
             Err(e) => {
                 eprintln!(
@@ -1905,8 +1920,20 @@ fn decompress_plain_bin_data(key: &str, raw: Vec<u8>, max_bytes: usize) -> Optio
 /// 같은 스트림은 한 번만 풀어 `Arc`로 공유한다(예산도 한 번만 쓴다).
 struct PlainBinDataBudget {
     remaining: usize,
-    /// (스트림 이름, OLE 여부) → 해제 결과. `None`은 상한 초과·실패로 건너뛴 항목이다.
+    /// (스트림 이름 소문자, OLE 여부) → 해제 결과. `None`은 상한 초과·실패로 건너뛴 항목이다.
+    /// CFB 이름 조회는 대소문자를 가리지 않으므로 키도 소문자로 맞춘다.
     decoded: std::collections::HashMap<(String, bool), Option<std::sync::Arc<[u8]>>>,
+}
+
+/// OLE Storage 해제 결과 앞의 4-byte size prefix 길이(없으면 0). `head`는 결과의 선두 12바이트 이상.
+/// Task #195 단계 6: CFB 매직 바로 앞의 4바이트만 건너뛴다.
+fn ole_size_prefix_len(head: &[u8]) -> usize {
+    let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+    if head.len() >= 12 && head[..8] != cfb_magic && head[4..12] == cfb_magic {
+        4
+    } else {
+        0
+    }
 }
 
 impl PlainBinDataBudget {
@@ -1917,9 +1944,25 @@ impl PlainBinDataBudget {
         }
     }
 
+    fn key(name: &str, is_storage: bool) -> (String, bool) {
+        (name.to_ascii_lowercase(), is_storage)
+    }
+
     /// 이미 처리한 스트림이면 결과(건너뜀 포함)를 돌려준다.
     fn cached(&self, name: &str, is_storage: bool) -> Option<Option<std::sync::Arc<[u8]>>> {
-        self.decoded.get(&(name.to_string(), is_storage)).cloned()
+        self.decoded.get(&Self::key(name, is_storage)).cloned()
+    }
+
+    /// 처리 결과(건너뜀 포함)를 기억하고 그대로 돌려준다.
+    fn finish(
+        &mut self,
+        name: &str,
+        is_storage: bool,
+        result: Option<std::sync::Arc<[u8]>>,
+    ) -> Option<std::sync::Arc<[u8]>> {
+        self.decoded
+            .insert(Self::key(name, is_storage), result.clone());
+        result
     }
 
     /// 항목 상한과 남은 예산 중 작은 쪽을 한도로 풀고, 성공하면 예산을 차감한다.
@@ -1931,41 +1974,23 @@ impl PlainBinDataBudget {
     ) -> Option<std::sync::Arc<[u8]>> {
         let limit = crate::model::bin_data::MAX_BIN_DATA_BYTES.min(self.remaining);
         let result = self.decode_shared(name, is_storage, raw, limit);
-        self.decoded
-            .insert((name.to_string(), is_storage), result.clone());
-        result
+        self.finish(name, is_storage, result)
     }
 
-    /// 압축 해제 결과를 `Vec`을 거치지 않고 공유 버퍼에 바로 풀어 예산을 차감한다.
-    /// 길이를 먼저 세고(메모리 O(1)) 정확한 크기로 한 번만 할당하므로 순간 피크가 결과 크기 하나뿐이다.
-    fn decode_shared(
+    /// 암호 문서 항목(복호화·해제를 마친 바이트)을 예산에 올린다. 남은 예산을 넘으면 건너뛴다.
+    fn admit_decrypted(
         &mut self,
         name: &str,
         is_storage: bool,
-        raw: Vec<u8>,
-        limit: usize,
+        bytes: Vec<u8>,
     ) -> Option<std::sync::Arc<[u8]>> {
-        let shared: std::sync::Arc<[u8]> = match cfb_reader::decompressed_len_capped(&raw, limit) {
-            Ok(len) => match cfb_reader::decompress_stream_exact_shared(&raw, len) {
-                Ok(buf) => buf,
-                // 센 길이와 풀린 결과가 어긋나는 일은 없지만, 어긋나면 기존 경로로 되돌아간다.
-                Err(_) => std::sync::Arc::from(decompress_plain_bin_data(name, raw, limit)?),
-            },
-            // 압축이 아니거나 상한 초과·실패: 기존 처리(원본 통과, 초과는 경고 후 건너뜀)
-            Err(_) => std::sync::Arc::from(decompress_plain_bin_data(name, raw, limit)?),
-        };
-        // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
-        let shared = if is_storage && shared.len() >= 12 {
-            let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-            if shared[..8] != cfb_magic && shared[4..12] == cfb_magic {
-                std::sync::Arc::<[u8]>::from(&shared[4..])
-            } else {
-                shared
-            }
-        } else {
-            shared
-        };
-        // 압축이 아닌 원본 통과분은 limit 검사를 거치지 않으므로 여기서 다시 막는다.
+        let result = self.charge(name, std::sync::Arc::<[u8]>::from(bytes));
+        self.finish(name, is_storage, result)
+    }
+
+    /// 해제 결과 길이만큼 예산을 차감한다. 남은 예산을 넘으면 경고 후 `None`이다.
+    /// 압축이 아닌 원본 통과분은 해제 한도 검사를 거치지 않으므로 여기서도 막는다.
+    fn charge(&mut self, name: &str, shared: std::sync::Arc<[u8]>) -> Option<std::sync::Arc<[u8]>> {
         if shared.len() > self.remaining {
             eprintln!(
                 "경고: BinData '{}' 가 문서 전체 압축 해제 예산({} 바이트)을 넘어 건너뜀",
@@ -1975,6 +2000,64 @@ impl PlainBinDataBudget {
         }
         self.remaining -= shared.len();
         Some(shared)
+    }
+
+    /// 압축 해제 결과를 `Vec`을 거치지 않고 공유 버퍼에 바로 풀어 예산을 차감한다.
+    /// 길이를 먼저 세고(메모리 O(1)) 정확한 크기로 한 번만 할당하므로 순간 피크가 결과 크기 하나뿐이다.
+    /// OLE size prefix는 풀면서 건너뛰어 복사 없이 뗀다.
+    fn decode_shared(
+        &mut self,
+        name: &str,
+        is_storage: bool,
+        raw: Vec<u8>,
+        limit: usize,
+    ) -> Option<std::sync::Arc<[u8]>> {
+        let shared: std::sync::Arc<[u8]> = match cfb_reader::decompressed_len_capped(&raw, limit) {
+            Ok(len) => {
+                let skip = if is_storage && len >= 12 {
+                    cfb_reader::decompress_stream_prefix(&raw, 12)
+                        .map(|head| ole_size_prefix_len(&head))
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                match cfb_reader::decompress_stream_exact_shared(&raw, len, skip) {
+                    Ok(buf) => buf,
+                    // 센 길이와 풀린 결과가 어긋나는 일은 없지만, 어긋나면 기존 경로로 되돌아간다.
+                    Err(_) => {
+                        let mut bytes = decompress_plain_bin_data(name, raw, limit)?;
+                        if is_storage {
+                            bytes.drain(..ole_size_prefix_len(&bytes));
+                        }
+                        std::sync::Arc::from(bytes)
+                    }
+                }
+            }
+            // 상한 초과는 길이 세기에서 이미 확인했다. 다시 풀지 않고 건너뛴다.
+            Err(cfb_reader::CfbError::LimitExceeded(_)) => {
+                if limit < crate::model::bin_data::MAX_BIN_DATA_BYTES {
+                    eprintln!(
+                        "경고: BinData '{}' 가 문서 전체 예산의 남은 {} 바이트를 넘어 건너뜀",
+                        name, limit
+                    );
+                } else {
+                    eprintln!(
+                        "경고: BinData '{}' 압축 해제 크기가 항목 상한({} 바이트)을 넘어 건너뜀",
+                        name, limit
+                    );
+                }
+                return None;
+            }
+            // 압축이 아닌 데이터(해제 실패)는 원본을 그대로 쓴다(기존 동작). 다시 풀어 보지 않는다.
+            Err(_) => {
+                let mut bytes = raw;
+                if is_storage {
+                    bytes.drain(..ole_size_prefix_len(&bytes));
+                }
+                std::sync::Arc::from(bytes)
+            }
+        };
+        self.charge(name, shared)
     }
 }
 
@@ -2302,6 +2385,18 @@ fn load_bin_data_content(
             continue;
         }
 
+        // 암호 문서도 같은 합계 예산·중복 제거를 쓴다(비암호 분기와 같은 규칙).
+        if let Some(hit) = budget.cached(&storage_name, is_storage) {
+            if let Some(bytes) = hit {
+                contents.push(BinDataContent {
+                    id: bd.storage_id,
+                    data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                    extension: ext.to_string(),
+                });
+            }
+            continue;
+        }
+
         match cfb.read_bin_data(&storage_name) {
             Ok(data) => {
                 // 암호 문서: 복호화+압축해제.
@@ -2311,7 +2406,7 @@ fn load_bin_data_content(
                         &data,
                         pwd,
                         stream_compressed,
-                        MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES,
+                        MAX_PASSWORD_PROTECTED_BIN_DATA_OUTPUT_BYTES.min(budget.remaining),
                     ) {
                         Ok(d) => d,
                         Err(e) => {
@@ -2319,6 +2414,7 @@ fn load_bin_data_content(
                                 "경고: BinData '{}' 복호화 실패 (비밀번호 불일치?): {}",
                                 storage_name, e
                             );
+                            budget.finish(&storage_name, is_storage, None);
                             continue;
                         }
                     }
@@ -2326,19 +2422,18 @@ fn load_bin_data_content(
 
                 // Task #195 단계 6: OLE Storage는 해제 후 선두 4바이트 size prefix를 스킵하여
                 // 내부 CFB(`d0cf11e0...`) 시작 바이트부터 노출한다.
-                if is_storage && decompressed.len() >= 12 {
-                    // CFB 매직이 바로 시작하면 prefix 없음
-                    let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-                    if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
-                        decompressed.drain(..4);
-                    }
+                if is_storage {
+                    decompressed.drain(..ole_size_prefix_len(&decompressed));
                 }
 
-                contents.push(BinDataContent {
-                    id: bd.storage_id,
-                    data: decompressed.into(),
-                    extension: ext.to_string(),
-                });
+                if let Some(bytes) = budget.admit_decrypted(&storage_name, is_storage, decompressed)
+                {
+                    contents.push(BinDataContent {
+                        id: bd.storage_id,
+                        data: crate::model::bin_data::BinDataBytes::from_shared(bytes),
+                        extension: ext.to_string(),
+                    });
+                }
             }
             Err(e) => {
                 eprintln!("경고: BinData '{}' 로드 실패: {}", storage_name, e);
@@ -3983,5 +4078,52 @@ mod tests {
         for c in &contents[1..] {
             assert!(std::sync::Arc::ptr_eq(&first, &c.data.load_shared()));
         }
+    }
+
+    fn deflate_for_test(data: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    /// 압축된 폭탄이 남은 예산(한도)을 넘으면 다시 풀지 않고 건너뛰며, 예산은 그대로이고 결과는 기억된다.
+    #[test]
+    fn compressed_bomb_over_remaining_budget_is_skipped_and_remembered() {
+        let mut budget = PlainBinDataBudget::new();
+        budget.remaining = 1000;
+        let bomb = deflate_for_test(&vec![0u8; 64 * 1024]);
+        assert!(budget.decode("BIN0001.bomb", false, bomb.clone()).is_none());
+        assert_eq!(budget.remaining, 1000);
+        assert_eq!(budget.cached("BIN0001.bomb", false), Some(None));
+        // 대소문자만 다른 이름도 같은 스트림으로 본다
+        assert_eq!(budget.cached("bin0001.BOMB", false), Some(None));
+        // 예산 안의 압축 항목은 통과하고 길이만큼 차감된다
+        let ok = budget.decode("BIN0002.dat", false, deflate_for_test(&[7u8; 600]));
+        assert_eq!(ok.as_deref().map(<[u8]>::len), Some(600));
+        assert_eq!(budget.remaining, 400);
+    }
+
+    /// OLE size prefix(4바이트)는 압축·비압축 모두 떼고, 일반 항목은 건드리지 않는다.
+    #[test]
+    fn plain_bin_data_budget_strips_ole_size_prefix() {
+        let magic = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        let mut body = vec![9u8, 0, 0, 0];
+        body.extend_from_slice(&magic);
+        body.extend_from_slice(&[1, 2, 3, 4]);
+        let mut budget = PlainBinDataBudget::new();
+        let packed = budget
+            .decode("BIN0001.OLE", true, deflate_for_test(&body))
+            .unwrap();
+        assert_eq!(&packed[..8], &magic);
+        assert_eq!(packed.len(), body.len() - 4);
+        // 압축이 아닌 원본(해제 실패)도 같다
+        let stored = budget.decode("BIN0002.OLE", true, body.clone()).unwrap();
+        assert_eq!(&stored[..], &body[4..]);
+        // Embedding(is_storage=false)은 그대로
+        let img = budget.decode("BIN0003.dat", false, body.clone()).unwrap();
+        assert_eq!(&img[..], &body[..]);
     }
 }

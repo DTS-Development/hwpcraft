@@ -1232,7 +1232,8 @@ pub fn decompressed_len_capped(data: &[u8], cap: usize) -> Result<usize, CfbErro
     }
 }
 
-/// 압축 해제 결과(정확히 `len` 바이트)를 처음부터 공유 버퍼(`Arc<[u8]>`)에 직접 쓴다.
+/// 압축 해제 결과(정확히 `len` 바이트)에서 선두 `skip` 바이트를 버린 나머지를
+/// 처음부터 공유 버퍼(`Arc<[u8]>`)에 직접 쓴다.
 ///
 /// `Vec`로 푼 뒤 `Arc::from`으로 옮기면 순간적으로 두 배를 쥐므로, `decompressed_len_capped`로
 /// 잰 길이를 받아 한 번에 할당하고 그 안에 푼다. 디코더 시도 순서(raw deflate → zlib)는
@@ -1240,10 +1241,20 @@ pub fn decompressed_len_capped(data: &[u8], cap: usize) -> Result<usize, CfbErro
 pub fn decompress_stream_exact_shared(
     data: &[u8],
     len: usize,
+    skip: usize,
 ) -> Result<std::sync::Arc<[u8]>, CfbError> {
-    fn fill<R: Read>(mut reader: R, len: usize) -> Result<std::sync::Arc<[u8]>, CfbError> {
+    fn fill<R: Read>(
+        mut reader: R,
+        len: usize,
+        skip: usize,
+    ) -> Result<std::sync::Arc<[u8]>, CfbError> {
         let map_err = |error: std::io::Error| CfbError::DecompressError(error.to_string());
-        let mut buf = std::sync::Arc::<[u8]>::new_zeroed_slice(len);
+        let kept = len
+            .checked_sub(skip)
+            .ok_or_else(|| CfbError::DecompressError("건너뛸 길이가 결과보다 길다".to_string()))?;
+        let mut head = vec![0u8; skip];
+        reader.read_exact(&mut head).map_err(map_err)?;
+        let mut buf = std::sync::Arc::<[u8]>::new_zeroed_slice(kept);
         // SAFETY: 방금 만든 Arc라 참조가 하나뿐이고, 0으로 채웠으므로 u8로 초기화돼 있다.
         let mut buf = unsafe { buf.assume_init() };
         let out = std::sync::Arc::get_mut(&mut buf).expect("새 Arc는 단독 소유");
@@ -1258,9 +1269,9 @@ pub fn decompress_stream_exact_shared(
         Ok(buf)
     }
 
-    match fill(flate2::read::DeflateDecoder::new(data), len) {
+    match fill(flate2::read::DeflateDecoder::new(data), len, skip) {
         Ok(buf) => Ok(buf),
-        Err(_) => fill(flate2::read::ZlibDecoder::new(data), len),
+        Err(_) => fill(flate2::read::ZlibDecoder::new(data), len, skip),
     }
 }
 
@@ -2105,10 +2116,13 @@ mod tests {
         for packed in [&raw, &zl] {
             let len = decompressed_len_capped(packed, usize::MAX / 2).unwrap();
             assert_eq!(len, payload.len());
-            let shared = decompress_stream_exact_shared(packed, len).unwrap();
+            let shared = decompress_stream_exact_shared(packed, len, 0).unwrap();
             assert_eq!(&*shared, payload.as_slice());
-            assert!(decompress_stream_exact_shared(packed, len - 1).is_err());
-            assert!(decompress_stream_exact_shared(packed, len + 1).is_err());
+            let skipped = decompress_stream_exact_shared(packed, len, 4).unwrap();
+            assert_eq!(&*skipped, &payload[4..]);
+            assert!(decompress_stream_exact_shared(packed, len - 1, 0).is_err());
+            assert!(decompress_stream_exact_shared(packed, len + 1, 0).is_err());
+            assert!(decompress_stream_exact_shared(packed, 2, 4).is_err());
         }
     }
 }
