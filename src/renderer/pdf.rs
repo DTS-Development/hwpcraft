@@ -2104,6 +2104,8 @@ fn pdf_image_href_resolver() -> usvg::ImageHrefResolver<'static> {
             },
             _ => default_data(mime, data, opts),
         }),
+        // 원칙: 문서 SVG 를 파싱하는 usvg Options 는 문자열 href(파일 경로)를 풀지 않는다.
+        // 새로 Options 를 만들면 기본 해석기가 다시 켜지므로 resolve_string 을 꼭 비운다.
         // 문서(하위 SVG 포함)가 가리키는 파일 경로는 읽지 않는다. usvg 기본 해석기는 href 를
         // 서버 로컬 경로로 열어 PNG·JPEG·SVG 를 PDF 에 넣으므로(S2) 빈 그림으로 처리한다.
         resolve_string: Box::new(|_, _| None),
@@ -2993,7 +2995,7 @@ endbfchar <DB80DEB1>";
         use base64::Engine;
         let path = write_ref_test_png("sub");
         let sub = format!(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"><image href="{}" width="4" height="2"/></svg>"#,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 2"><image href="{}" width="4" height="2"/><image href="data:image/png;base64,{REF_TEST_PNG_BASE64}" width="4" height="2"/></svg>"#,
             path.display()
         );
         let sub_b64 = base64::engine::general_purpose::STANDARD.encode(sub.as_bytes());
@@ -3003,7 +3005,12 @@ endbfchar <DB80DEB1>";
         let pdf = svgs_to_pdf(&[svg]);
         let _ = std::fs::remove_file(&path);
         let pdf = pdf.unwrap();
-        assert_eq!(image_xobject_count(&pdf), 0, "하위 SVG 의 파일 경로 그림이 PDF 에 들어갔다");
+        // 하위 SVG 는 정상 파싱돼 안의 data: 비트맵(#6612)은 남고, 파일 경로 그림만 빠진다.
+        assert_eq!(
+            image_xobject_count(&pdf),
+            1,
+            "하위 SVG 의 파일 경로 그림이 들어갔거나 data: 그림이 빠졌다"
+        );
     }
 
     #[test]
