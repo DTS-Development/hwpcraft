@@ -1930,28 +1930,51 @@ impl PlainBinDataBudget {
         raw: Vec<u8>,
     ) -> Option<std::sync::Arc<[u8]>> {
         let limit = crate::model::bin_data::MAX_BIN_DATA_BYTES.min(self.remaining);
-        let result = decompress_plain_bin_data(name, raw, limit).and_then(|mut bytes| {
-            // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
-            if is_storage && bytes.len() >= 12 {
-                let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-                if bytes[..8] != cfb_magic && bytes[4..12] == cfb_magic {
-                    bytes.drain(..4);
-                }
-            }
-            // 압축이 아닌 원본 통과분은 limit 검사를 거치지 않으므로 여기서 다시 막는다.
-            if bytes.len() > self.remaining {
-                eprintln!(
-                    "경고: BinData '{}' 가 문서 전체 압축 해제 예산({} 바이트)을 넘어 건너뜀",
-                    name, PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES
-                );
-                return None;
-            }
-            self.remaining -= bytes.len();
-            Some(std::sync::Arc::<[u8]>::from(bytes))
-        });
+        let result = self.decode_shared(name, is_storage, raw, limit);
         self.decoded
             .insert((name.to_string(), is_storage), result.clone());
         result
+    }
+
+    /// 압축 해제 결과를 `Vec`을 거치지 않고 공유 버퍼에 바로 풀어 예산을 차감한다.
+    /// 길이를 먼저 세고(메모리 O(1)) 정확한 크기로 한 번만 할당하므로 순간 피크가 결과 크기 하나뿐이다.
+    fn decode_shared(
+        &mut self,
+        name: &str,
+        is_storage: bool,
+        raw: Vec<u8>,
+        limit: usize,
+    ) -> Option<std::sync::Arc<[u8]>> {
+        let shared: std::sync::Arc<[u8]> = match cfb_reader::decompressed_len_capped(&raw, limit) {
+            Ok(len) => match cfb_reader::decompress_stream_exact_shared(&raw, len) {
+                Ok(buf) => buf,
+                // 센 길이와 풀린 결과가 어긋나는 일은 없지만, 어긋나면 기존 경로로 되돌아간다.
+                Err(_) => std::sync::Arc::from(decompress_plain_bin_data(name, raw, limit)?),
+            },
+            // 압축이 아니거나 상한 초과·실패: 기존 처리(원본 통과, 초과는 경고 후 건너뜀)
+            Err(_) => std::sync::Arc::from(decompress_plain_bin_data(name, raw, limit)?),
+        };
+        // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
+        let shared = if is_storage && shared.len() >= 12 {
+            let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+            if shared[..8] != cfb_magic && shared[4..12] == cfb_magic {
+                std::sync::Arc::<[u8]>::from(&shared[4..])
+            } else {
+                shared
+            }
+        } else {
+            shared
+        };
+        // 압축이 아닌 원본 통과분은 limit 검사를 거치지 않으므로 여기서 다시 막는다.
+        if shared.len() > self.remaining {
+            eprintln!(
+                "경고: BinData '{}' 가 문서 전체 압축 해제 예산({} 바이트)을 넘어 건너뜀",
+                name, PLAIN_BIN_DATA_DOCUMENT_BUDGET_BYTES
+            );
+            return None;
+        }
+        self.remaining -= shared.len();
+        Some(shared)
     }
 }
 
