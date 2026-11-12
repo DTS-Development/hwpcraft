@@ -308,3 +308,22 @@ test('오른쪽 버튼 메뉴는 정책이 끈 명령을 만들지 않고 빈 �
   assert.match(src, /if \(!this\.dispatcher\.isHostAllowed\(cmdId\)\) \{ skippedByPolicy = true; continue; \}/);
   assert.match(src, /if \(!menu\.querySelector\('\.md-item'\)\) return;/);
 });
+
+test('단축키가 부르는 명령은 정책이 끈 경우 dispatcher 게이트에서 거부된다', () => {
+  for (const id of ['format:char-shape', 'edit:cut', 'edit:copy', 'edit:paste', 'format:bold']) {
+    const d = new CommandDispatcher({ get: (c: string) => (c === id ? { id: c, execute: () => { throw new Error('실행되면 안 된다'); } } : undefined) } as any, {} as any, {} as any);
+    d.setGate((c) => (c === id ? 'deny' : 'allow'));
+    assert.deepEqual(d.dispatchWithResult(id), { ok: false, reason: 'disabled' });
+  }
+});
+
+test('입력 처리기는 format-char 를 직접 내보내지 않고, 브라우저 복사·잘라내기·붙여넣기도 정책을 확인한다', () => {
+  const emitters = readdirSync(new URL('../src/engine/', import.meta.url))
+    .filter((f) => f.endsWith('.ts'))
+    .filter((f) => /emit\(\s*'(format-char|highlight-pick)'/.test(codeOnly(read(`src/engine/${f}`))));
+  assert.deepEqual(emitters, []);
+  const src = codeOnly(read('src/engine/input-handler.ts'));
+  for (const id of ['edit:copy', 'edit:cut', 'edit:paste']) {
+    assert.match(src, new RegExp(`!this\\.dispatcher\\.isHostAllowed\\('${id}'\\)\\) \\{ e\\.preventDefault\\(\\)`));
+  }
+});
