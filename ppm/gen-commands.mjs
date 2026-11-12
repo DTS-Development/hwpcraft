@@ -132,6 +132,13 @@ if (unbound.length) {
   console.error(`조작 요소 대응표에는 있으나 명령 목록에 없는 id: ${unbound.join(', ')}`);
   process.exit(1);
 }
+// 메뉴·도구 모음의 data-cmd 는 모두 목록에 있어야 한다 — 목록에 없는 id 는 관리자가 끌 수 없어 화면에 계속 남는다.
+const htmlIds = new Set([...readFileSync(join(studio, 'index.html'), 'utf8').matchAll(/data-cmd="([^"]+)"/g)].map((m) => m[1]));
+const notListed = [...htmlIds].filter((id) => !ids.has(id));
+if (notListed.length) {
+  console.error(`index.html 에는 있으나 명령 목록에 없는 data-cmd: ${notListed.join(', ')}`);
+  process.exit(1);
+}
 const dup = commands.length - ids.size;
 if (dup) { console.error('중복 id'); process.exit(1); }
 
