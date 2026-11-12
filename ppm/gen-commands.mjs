@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 관리자 화면이 읽는 명령 목록(commands.json)을 만든다.
-// 형식(공통): { app, schema: 1, commands: [{ id, label, labelKo, location[], grades: { builder } }] }
+// 형식(공통): { app, schema: 1, commands: [{ id, label, labelKo, location[], alsoAt?[], grades: { builder } }] }
 // 편집기의 실제 명령 모듈을 vite SSR 로 읽어 만들고, 등급은 src/ppm/command-policy.ts 표에서 가져온다
 // — 표와 목록이 어긋날 수 없다. 표에 있는 id 가 명령 목록에 없으면 실패한다.
 // 메뉴에 없는 명령(서식 막대·상태 표시줄 등)의 location 은 src/ppm/control-commands.ts 대응표의 표면 이름이다.
@@ -92,6 +92,9 @@ const { NON_DEFAULT_GRADES, gradeOf } = ko.policy;
 // 메뉴에 위치가 없는 명령은 처음 만나는 조작 요소의 표면(도구 상자·서식 막대·상태 표시줄)을 위치로 쓴다:
 // index.html 에서 data-cmd 를 가진 도구 모음 단추, 그다음 대응표(data-cmd 가 없는 요소).
 const surfaceOf = new Map();
+// alsoAt 용: 명령 하나가 놓인 모든 조작 표면(도구 상자·서식 막대·상태 표시줄) 이름.
+const surfacesOf = new Map();
+const addSurface = (id, name) => { if (!surfacesOf.has(id)) surfacesOf.set(id, new Set()); surfacesOf.get(id).add(name); };
 {
   const html = readFileSync(join(studio, 'index.html'), 'utf8');
   const regions = [['id="icon-toolbar"', 'toolbox'], ['id="style-bar"', 'format'], ['id="status-bar"', 'status']]
@@ -101,20 +104,26 @@ const surfaceOf = new Map();
   for (const m of html.matchAll(/data-cmd="([^"]+)"/g)) {
     const region = regions.filter(([pos]) => pos <= m.index).at(-1);
     if (region && !surfaceOf.has(m[1])) surfaceOf.set(m[1], region[1]);
+    if (region) addSurface(m[1], region[1]);
   }
 }
 for (const b of ko.controls.CONTROL_BINDINGS) {
+  addSurface(b.commandId, ko.controls.SURFACE_LABELS[b.surface]);
   if (!surfaceOf.has(b.commandId)) surfaceOf.set(b.commandId, ko.controls.SURFACE_LABELS[b.surface]);
 }
 
 const commands = [];
 for (const [id, labelKo] of ko.labels) {
   const keys = locs.get(id) ?? [];
+  const location = keys.length ? keys.map((k) => en.t(k)) : surfaceOf.has(id) ? [surfaceOf.get(id)] : ['Other'];
+  // location 에 이미 있는 표면은 빼고, 남는 표면만 alsoAt 에 적는다(없으면 필드 자체를 생략).
+  const alsoAt = [...(surfacesOf.get(id) ?? [])].filter((n) => !location.includes(n));
   commands.push({
     id,
     label: String(en.labels.get(id) ?? labelKo),
     labelKo: String(labelKo),
-    location: keys.length ? keys.map((k) => en.t(k)) : surfaceOf.has(id) ? [surfaceOf.get(id)] : ['Other'],
+    location,
+    ...(alsoAt.length ? { alsoAt } : {}),
     grades: { builder: gradeOf(id) },
   });
 }
