@@ -163,6 +163,30 @@ impl crate::model::bin_data::BinDataResolver for HwpxBinResolver {
     }
 }
 
+/// `Chart/chart1..64.xml`을 읽어 `bin_data_id = 60000+N` 내용으로 만든다.
+///
+/// 번호가 이어지다 처음 없는 번호에서 멈춘다. 항목이 있는데 읽지 못한 경우(항목 상한 초과·
+/// CRC 오류 등)는 그 항목만 빼고 뒤 번호를 계속 읽는다. 문서 합계 예산을 넘으면 문서를 거절한다.
+fn load_chart_entries(reader: &mut reader::HwpxReader) -> Result<Vec<BinDataContent>, HwpxError> {
+    let mut charts = Vec::new();
+    for n in 1..=64u16 {
+        let path = format!("Chart/chart{}.xml", n);
+        if reader.file_index(&path).is_err() {
+            break;
+        }
+        match reader.read_retained_bytes(&path) {
+            Ok(data) => charts.push(BinDataContent {
+                id: 60000 + n,
+                data: data.into(),
+                extension: "ooxml_chart".to_string(),
+            }),
+            Err(e @ HwpxError::XmlReadBudgetExceeded { .. }) => return Err(e),
+            Err(e) => eprintln!("경고: {} 읽기 실패: {} — 이 차트를 건너뜀", path, e),
+        }
+    }
+    Ok(charts)
+}
+
 /// HWPX 파싱 에러
 #[derive(Debug)]
 pub enum HwpxError {
@@ -496,7 +520,7 @@ pub(crate) fn parse_hwpx_with_reservation(
         } else if *path == "Preview/PrvImage.png" {
             reader.read_file_bytes_limited(path, super::MAX_THUMBNAIL_BYTES)
         } else {
-            reader.read_file_bytes(path)
+            reader.read_retained_bytes(path)
         };
         match entry {
             Ok(bytes) => hwpx_aux_entries.push((path.to_string(), bytes)),
@@ -518,12 +542,12 @@ pub(crate) fn parse_hwpx_with_reservation(
         let entry = if path.to_ascii_lowercase().ends_with(".xml") {
             reader.read_xml_bytes_limited(&path, reader::MAX_XML_SIZE)
         } else {
-            reader.read_file_bytes(&path)
+            reader.read_retained_bytes(&path)
         };
         match entry {
             Ok(bytes) => hwpx_aux_entries.push((path, bytes)),
             Err(e @ HwpxError::XmlReadBudgetExceeded { .. }) => return Err(e),
-            Err(_) => {}
+            Err(e) => eprintln!("경고: {} 읽기 실패: {} — 이 항목을 건너뜀", path, e),
         }
     }
 
@@ -824,19 +848,7 @@ pub(crate) fn parse_hwpx_with_reservation(
 
     // 5-1. Chart/*.xml (OOXML 차트) 로딩 — bin_data_id = 60000+N, extension="ooxml_chart"
     // section 파서에서 <hp:chart chartIDRef="Chart/chartN.xml">를 만나면 동일 ID의 OleShape 생성
-    for n in 1..=64u16 {
-        let path = format!("Chart/chart{}.xml", n);
-        match reader.read_file_bytes(&path) {
-            Ok(data) => {
-                bin_data_content.push(BinDataContent {
-                    id: 60000 + n,
-                    data: data.into(),
-                    extension: "ooxml_chart".to_string(),
-                });
-            }
-            Err(_) => break,
-        }
-    }
+    bin_data_content.extend(load_chart_entries(&mut reader)?);
 
     // Document 조립
     if default_para_shape_scope.used() {
@@ -872,8 +884,11 @@ pub(crate) fn parse_hwpx_with_reservation(
     // _LinkDoc, Scripts/JScriptVersion) 은 Stage 2.2 의 blank2010.hwp
     // fallback 으로 보강. cfb_writer (`src/serializer/cfb_writer.rs:155`)
     // 가 Document::extra_streams 를 그대로 OLE 스트림으로 작성.
-    let contract =
-        contract_streams::extract_contract_streams(&mut reader, super::MAX_THUMBNAIL_BYTES);
+    let contract = contract_streams::extract_contract_streams(
+        &mut reader,
+        &hwpx_aux_entries,
+        super::MAX_THUMBNAIL_BYTES,
+    );
 
     let mut doc = Document {
         header: model_header,
@@ -1011,6 +1026,58 @@ pub(crate) fn physical_para_margin_units_from_version(xml: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn chart_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, data) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// 차트 합계가 문서 예산을 넘으면 `break`로 삼키지 않고 문서를 거절한다.
+    #[test]
+    fn chart_entries_over_document_budget_reject_document() {
+        let bytes = chart_zip(&[
+            ("Chart/chart1.xml", vec![b'A'; 600]),
+            ("Chart/chart2.xml", vec![b'A'; 600]),
+        ]);
+        let mut reader = reader::HwpxReader::open(&bytes).unwrap();
+        reader.set_xml_read_remaining_for_test(1000);
+        assert!(matches!(
+            load_chart_entries(&mut reader),
+            Err(HwpxError::XmlReadBudgetExceeded { .. })
+        ));
+    }
+
+    /// 항목이 있는데 읽지 못한 차트(CRC 오류)는 그 항목만 빠지고 뒤 번호는 계속 읽는다.
+    /// 없는 번호를 만나면 멈춘다.
+    #[test]
+    fn chart_entry_read_failure_skips_only_that_chart() {
+        let mut bytes = chart_zip(&[
+            ("Chart/chart1.xml", b"first-chart-data".to_vec()),
+            ("Chart/chart2.xml", b"second-chart-data".to_vec()),
+            ("Chart/chart3.xml", b"third-chart-data".to_vec()),
+            ("Chart/chart5.xml", b"after-gap".to_vec()),
+        ]);
+        let pos = bytes
+            .windows(17)
+            .position(|w| w == b"second-chart-data")
+            .unwrap();
+        bytes[pos] ^= 0xff; // Stored 데이터를 깨뜨려 CRC 오류를 만든다
+        let mut reader = reader::HwpxReader::open(&bytes).unwrap();
+        let charts = load_chart_entries(&mut reader).unwrap();
+        let ids: Vec<u16> = charts.iter().map(|c| c.id).collect();
+        assert_eq!(
+            ids,
+            vec![60001, 60003],
+            "2번만 빠지고 3번은 읽히며 4번 공백에서 멈춘다"
+        );
+    }
 
     #[test]
     fn test_parse_hwpx_invalid_data() {

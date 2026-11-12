@@ -64,6 +64,7 @@ pub(super) struct ContractStreams {
 /// 와 비교하여 추가 fallback (HwpSummary / DocOptions/_LinkDoc) 가 필요.
 pub(super) fn extract_contract_streams(
     reader: &mut HwpxReader,
+    aux_entries: &[(String, Vec<u8>)],
     max_preview_image_bytes: usize,
 ) -> ContractStreams {
     let mut streams = Vec::new();
@@ -94,8 +95,15 @@ pub(super) fn extract_contract_streams(
     //
     // 압축은 raw deflate (zlib 헤더 없음). Stage 2.1 의 단순 zlib_deflate(sourceScripts) 는
     // 한컴이 받아들이지만 var 선언 부재로 Form 컨트롤 JS 핸들러 미동작.
-    let header_scripts = reader.read_file_bytes("Scripts/headerScripts").ok();
-    let source_scripts = reader.read_file_bytes("Scripts/sourceScripts").ok();
+    // 파싱 때 이미 읽어 둔 aux 엔트리를 다시 쓴다 — 두 번 풀어 문서 합계에서 두 번 빠지지 않게 한다.
+    let aux_bytes = |name: &str| {
+        aux_entries
+            .iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, bytes)| bytes.as_slice())
+    };
+    let header_scripts = aux_bytes("Scripts/headerScripts");
+    let source_scripts = aux_bytes("Scripts/sourceScripts");
     let scripts_default_jscript = match (header_scripts, source_scripts) {
         (Some(hs), Some(ss)) if !hs.is_empty() || !ss.is_empty() => {
             let mut combined = Vec::with_capacity(4 + hs.len() + 4 + ss.len() + 12);
@@ -177,5 +185,46 @@ mod tests {
             .read_to_end(&mut decoded)
             .expect("zlib inflate failed");
         assert_eq!(decoded, input);
+    }
+
+    /// 스크립트는 reader를 다시 읽지 않고 파싱 때 읽어 둔 aux 엔트리를 쓴다(합계 차감 1회).
+    #[test]
+    fn scripts_come_from_aux_entries_without_rereading_zip() {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("mimetype", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"x").unwrap();
+        let bytes = zip.finish().unwrap().into_inner();
+        let mut reader = HwpxReader::open(&bytes).unwrap();
+        let before = reader.xml_read_remaining();
+
+        let aux = vec![
+            ("Scripts/headerScripts".to_string(), b"var a;".to_vec()),
+            (
+                "Scripts/sourceScripts".to_string(),
+                b"function f(){}".to_vec(),
+            ),
+        ];
+        let with = extract_contract_streams(&mut reader, &aux, 1024);
+        let without = extract_contract_streams(&mut reader, &[], 1024);
+
+        let jscript = |c: &ContractStreams| {
+            c.streams
+                .iter()
+                .find(|(name, _)| name == "/Scripts/DefaultJScript")
+                .map(|(_, data)| data.clone())
+                .unwrap()
+        };
+        assert_ne!(
+            jscript(&with),
+            jscript(&without),
+            "aux 스크립트가 반영돼야 한다"
+        );
+        assert_eq!(
+            reader.xml_read_remaining(),
+            before,
+            "zip에서 다시 읽지 않는다"
+        );
     }
 }
