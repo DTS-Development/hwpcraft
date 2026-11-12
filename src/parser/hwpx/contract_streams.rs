@@ -94,8 +94,8 @@ pub(super) fn extract_contract_streams(
     //
     // 압축은 raw deflate (zlib 헤더 없음). Stage 2.1 의 단순 zlib_deflate(sourceScripts) 는
     // 한컴이 받아들이지만 var 선언 부재로 Form 컨트롤 JS 핸들러 미동작.
-    let header_scripts = reader.read_file_bytes("Scripts/headerScripts").ok();
-    let source_scripts = reader.read_file_bytes("Scripts/sourceScripts").ok();
+    let header_scripts = reader.read_retained_bytes("Scripts/headerScripts").ok();
+    let source_scripts = reader.read_retained_bytes("Scripts/sourceScripts").ok();
     let scripts_default_jscript = match (header_scripts, source_scripts) {
         (Some(hs), Some(ss)) if !hs.is_empty() || !ss.is_empty() => {
             let mut combined = Vec::with_capacity(4 + hs.len() + 4 + ss.len() + 12);

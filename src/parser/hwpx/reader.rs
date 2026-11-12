@@ -57,6 +57,11 @@ pub const MAX_TOTAL_XML_BYTES: usize = 512 * 1024 * 1024;
 /// read_to_end 차단)라는 목적은 유지된다.
 pub const MAX_BINDATA_SIZE: usize = 512 * 1024 * 1024; // 512 MB
 
+/// ZIP 항목 수 상한. zip32 한계(65,535)와 같아 일반 ZIP에는 영향이 없고, zip64로만
+/// 만들 수 있는 수백만 항목짜리 목록(항목 이름 색인·순회)을 막는다. 실문서 최대는 474개.
+/// 중앙 디렉터리는 `ZipArchive::new`가 먼저 읽으므로 그 단계의 메모리는 입력 크기에 비례한다.
+pub const MAX_ENTRIES: usize = 65_535;
+
 /// `reader`에서 최대 `max` 바이트까지 읽는다. 초과 시 `InvalidData` 에러.
 ///
 /// `Read::take(max + 1)`을 사용해 오버플로를 감지하되, 버퍼는 실제 읽은
@@ -167,6 +172,13 @@ impl HwpxReader {
         };
         let cursor = Cursor::new(copy);
         let archive = ZipArchive::new(cursor)?;
+        if archive.len() > MAX_ENTRIES {
+            return Err(HwpxError::ZipError(format!(
+                "HWPX entry count {} exceeds {} limit",
+                archive.len(),
+                MAX_ENTRIES
+            )));
+        }
         let mut file_names = Vec::new();
         if let Some(reservation) = &reservation {
             reservation
@@ -221,6 +233,15 @@ impl HwpxReader {
     /// 엔트리 압축 해제 크기는 [`MAX_BINDATA_SIZE`]로 제한된다.
     pub fn read_file_bytes(&mut self, path: &str) -> Result<Vec<u8>, HwpxError> {
         self.read_file_bytes_limited(path, MAX_BINDATA_SIZE)
+    }
+
+    /// 파싱 중 한꺼번에 읽어 문서에 남겨 두는 비-XML 항목(차트·스크립트 등)을 읽는다.
+    ///
+    /// 항목마다 [`MAX_XML_SIZE`]로 끊고, XML 본문과 같은 문서 합계([`MAX_TOTAL_XML_BYTES`])에
+    /// 실제 풀린 양을 차감한다. 항목 수가 많은 폭탄이 항목 상한만으로 메모리를 채우지 못하게 한다.
+    /// 지연 로딩 BinData는 요청 때마다 항목 상한만 쓰므로 이 경로를 쓰지 않는다.
+    pub(super) fn read_retained_bytes(&mut self, path: &str) -> Result<Vec<u8>, HwpxError> {
+        self.read_bytes_with_policy(path, MAX_XML_SIZE, true)
     }
 
     /// 지정한 경로의 파일을 `max_bytes` 바이트까지만 압축 해제한다.
@@ -611,5 +632,82 @@ mod tests {
             }
             other => panic!("expected ZipError, got {:?}", other),
         }
+    }
+
+    fn deflated_zip(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, data) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// 항목 수가 `MAX_ENTRIES`를 넘는 ZIP(zip64)은 열기에서 거절한다.
+    #[test]
+    fn test_entry_count_over_limit_rejected() {
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for n in 0..=MAX_ENTRIES {
+            zip.start_file(format!("BinData/e{n}.bin"), opts).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        match HwpxReader::open(&bytes) {
+            Err(HwpxError::ZipError(msg)) => assert!(msg.contains("entry count"), "{msg}"),
+            other => panic!("항목 수 초과가 거절돼야 한다: {:?}", other.map(|_| ())),
+        }
+    }
+
+    /// 문서에 남겨 두는 비-XML 항목도 XML과 같은 문서 합계에 차감되고, 합계를 넘으면 거절한다.
+    #[test]
+    fn test_retained_entries_share_document_budget() {
+        let bytes = deflated_zip(&[
+            ("Chart/chart1.xml", vec![b'A'; 600]),
+            ("Chart/chart2.xml", vec![b'A'; 600]),
+        ]);
+        let mut reader = HwpxReader::open(&bytes).unwrap();
+        reader.xml_read_remaining = 1000;
+        assert_eq!(
+            reader
+                .read_retained_bytes("Chart/chart1.xml")
+                .unwrap()
+                .len(),
+            600
+        );
+        assert_eq!(reader.xml_read_remaining, 400);
+        assert!(matches!(
+            reader.read_retained_bytes("Chart/chart2.xml"),
+            Err(HwpxError::XmlReadBudgetExceeded { .. })
+        ));
+    }
+
+    /// 중앙 디렉터리의 비압축 크기를 작게 속인 항목은 선언 크기 밖으로 풀리지 않고 거절된다.
+    #[test]
+    fn test_retained_entry_with_false_declared_size_is_rejected() {
+        let mut bytes = deflated_zip(&[("Scripts/lie.bin", vec![b'A'; 5000])]);
+        // 중앙 디렉터리(PK\x01\x02) 24..28 과 로컬 헤더(PK\x03\x04) 22..26 의 비압축 크기를 10으로 고친다.
+        let central = bytes.windows(4).rposition(|w| w == b"PK\x01\x02").unwrap();
+        bytes[central + 24..central + 28].copy_from_slice(&10u32.to_le_bytes());
+        let local =
+            u32::from_le_bytes(bytes[central + 42..central + 46].try_into().unwrap()) as usize;
+        bytes[local + 22..local + 26].copy_from_slice(&10u32.to_le_bytes());
+
+        let mut reader = HwpxReader::open(&bytes).unwrap();
+        reader.xml_read_remaining = 1000;
+        // zip 라이브러리가 선언 크기를 넘는 출력을 거절하므로 선언 크기 이상은 풀리지 않는다.
+        let result = reader.read_retained_bytes("Scripts/lie.bin");
+        assert!(
+            matches!(&result, Err(HwpxError::ZipError(msg)) if msg.contains("declared")),
+            "{:?}",
+            result.map(|v| v.len())
+        );
+        assert!(
+            reader.xml_read_remaining >= 990,
+            "선언 크기 밖으로 풀리면 안 된다"
+        );
     }
 }

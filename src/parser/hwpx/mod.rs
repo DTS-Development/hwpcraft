@@ -496,7 +496,7 @@ pub(crate) fn parse_hwpx_with_reservation(
         } else if *path == "Preview/PrvImage.png" {
             reader.read_file_bytes_limited(path, super::MAX_THUMBNAIL_BYTES)
         } else {
-            reader.read_file_bytes(path)
+            reader.read_retained_bytes(path)
         };
         match entry {
             Ok(bytes) => hwpx_aux_entries.push((path.to_string(), bytes)),
@@ -518,7 +518,7 @@ pub(crate) fn parse_hwpx_with_reservation(
         let entry = if path.to_ascii_lowercase().ends_with(".xml") {
             reader.read_xml_bytes_limited(&path, reader::MAX_XML_SIZE)
         } else {
-            reader.read_file_bytes(&path)
+            reader.read_retained_bytes(&path)
         };
         match entry {
             Ok(bytes) => hwpx_aux_entries.push((path, bytes)),
@@ -826,7 +826,7 @@ pub(crate) fn parse_hwpx_with_reservation(
     // section 파서에서 <hp:chart chartIDRef="Chart/chartN.xml">를 만나면 동일 ID의 OleShape 생성
     for n in 1..=64u16 {
         let path = format!("Chart/chart{}.xml", n);
-        match reader.read_file_bytes(&path) {
+        match reader.read_retained_bytes(&path) {
             Ok(data) => {
                 bin_data_content.push(BinDataContent {
                     id: 60000 + n,
@@ -834,6 +834,7 @@ pub(crate) fn parse_hwpx_with_reservation(
                     extension: "ooxml_chart".to_string(),
                 });
             }
+            Err(e @ HwpxError::XmlReadBudgetExceeded { .. }) => return Err(e),
             Err(_) => break,
         }
     }
