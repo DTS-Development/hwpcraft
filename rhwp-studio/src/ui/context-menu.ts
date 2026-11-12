@@ -32,6 +32,7 @@ export class ContextMenu {
 
     const menu = document.createElement('div');
     menu.className = 'context-menu';
+    let skippedByPolicy = false;
 
     for (const item of items) {
       if (item.type === 'separator') {
@@ -44,6 +45,8 @@ export class ContextMenu {
       const cmdId = item.commandId!;
       const def = this.registry.get(cmdId);
       if (!def) continue;
+      // 호스트 정책이 끈 명령은 항목째 만들지 않는다(기본 빌드는 게이트가 없어 건너뛰는 일이 없다).
+      if (!this.dispatcher.isHostAllowed(cmdId)) { skippedByPolicy = true; continue; }
 
       const row = document.createElement('div');
       row.className = 'md-item';
@@ -75,6 +78,19 @@ export class ContextMenu {
       });
 
       menu.appendChild(row);
+    }
+
+    if (skippedByPolicy) {
+      // 남은 구분선(맨 앞·연속·맨 끝)을 걷어내고, 항목이 하나도 없으면 빈 상자를 띄우지 않는다.
+      let prevIsRow = false;
+      for (const child of Array.from(menu.children)) {
+        if (!child.classList.contains('md-sep')) { prevIsRow = true; continue; }
+        if (!prevIsRow) child.remove();
+        else prevIsRow = false;
+      }
+      const last = menu.lastElementChild;
+      if (last?.classList.contains('md-sep')) last.remove();
+      if (!menu.querySelector('.md-item')) return;
     }
 
     document.body.appendChild(menu);

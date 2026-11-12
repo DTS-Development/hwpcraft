@@ -2077,16 +2077,20 @@ export class InputHandler {
 
   /** 복사 이벤트 처리 */
   private onCopy(e: ClipboardEvent): boolean {
+    // 브라우저 기본 복사(Ctrl+C 이외 경로)도 정책으로 끈 명령이면 막는다.
+    if (this.dispatcher && !this.dispatcher.isHostAllowed('edit:copy')) { e.preventDefault(); return false; }
     return _keyboard.onCopy.call(this, e);
   }
 
   /** 잘라내기 이벤트 처리 */
   private onCut(e: ClipboardEvent): void {
+    if (this.dispatcher && !this.dispatcher.isHostAllowed('edit:cut')) { e.preventDefault(); return; }
     _keyboard.onCut.call(this, e);
   }
 
   /** 붙여넣기 이벤트 처리 */
   private onPaste(e: ClipboardEvent): void {
+    if (this.dispatcher && !this.dispatcher.isHostAllowed('edit:paste')) { e.preventDefault(); return; }
     _keyboard.onPaste.call(this, e);
   }
 

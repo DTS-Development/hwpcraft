@@ -6,6 +6,8 @@ import type { CommandGate } from '../command/dispatcher.ts';
 import { isExternalLinkBlockedBy } from './external-link.ts';
 import { isCommandAllowed, sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
 import { createHostBridge, type SaveSnapshot, type HwpFormat } from './host-bridge.ts';
+import { CONTROL_BINDINGS } from './control-commands.ts';
+import { CONTAINER_SELECTOR, PRUNE_ROOTS, SEPARATOR_SELECTOR, TRIGGER_SELECTOR, pruneChrome, type PruneRules } from './menu-prune.ts';
 import { PpmHostFonts } from './host-fonts.ts';
 import { setHostOutput } from './host-output.ts';
 import { isHostConnected, PPM_HOST_MARKER } from './host-mode.ts';
@@ -43,6 +45,9 @@ function showDisconnectedOverlay(): void {
   document.body.appendChild(el);
 }
 
+/** 문맥 전용 묶음의 hidden 변화를 보는 관찰자. 다시 설치되면 이전 것을 해제한다. */
+let hiddenObserver: MutationObserver | null = null;
+
 /** 설치에 성공해 부모와 연결되면 true. */
 export function installPpmHost(opts: HostInstallOptions): boolean {
   document.documentElement.setAttribute('data-ppm-host', PPM_HOST_MARKER);
@@ -57,13 +62,53 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   style.setAttribute('data-ppm-host-policy', '');
   document.head.appendChild(style);
 
+  // 정책 대상 조작 요소(data-cmd 또는 대응표 selector)와 그 빈 껍데기를 숨긴다.
+  const HIDE_ATTR = 'data-ppm-hide';
+  const pruneRules: PruneRules<Element> = {
+    leafBlocked: (el) => {
+      const cmd = el.getAttribute('data-cmd');
+      if (cmd) return !isCommandAllowed(cmd, overrides);
+      const bound = boundControls.get(el);
+      return bound === undefined ? null : !isCommandAllowed(bound, overrides);
+    },
+    isContainer: (el) => el.matches(CONTAINER_SELECTOR),
+    isSeparator: (el) => el.matches(SEPARATOR_SELECTOR),
+    isTrigger: (el) => el.matches(TRIGGER_SELECTOR),
+    setHidden: (el, hidden) => { el.toggleAttribute(HIDE_ATTR, hidden); },
+    isContextHidden: (el) => el.hasAttribute('hidden'),
+  };
+  let boundControls = new Map<Element, string>();
+
+  const pruneAll = () => { for (const root of document.querySelectorAll(PRUNE_ROOTS)) pruneChrome(root, pruneRules); };
+
   // 막힌 명령의 메뉴·도구막대 표면을 숨긴다(실행은 게이트가 따로 막는다).
   const refreshHiddenSurfaces = () => {
     const rules = opts.knownCommandIds()
       .filter((id) => !isCommandAllowed(id, overrides) && /^[A-Za-z0-9_.:-]+$/.test(id))
       .map((id) => `[data-cmd="${id}"]{display:none!important}`);
+    rules.push(`[${HIDE_ATTR}]{display:none!important}`);
     style.textContent = rules.join('\n');
+    boundControls = new Map();
+    for (const b of CONTROL_BINDINGS) {
+      for (const el of document.querySelectorAll(b.selector)) boundControls.set(el, b.commandId);
+    }
+    pruneAll();
   };
+  // 편집기가 문맥 전용 묶음(회전·머리말·각주)을 hidden 으로 켜고 끌 때 빈 띠 판정을 다시 한다.
+  // 우리 숨김은 data-ppm-hide 라 이 관찰을 다시 부르지 않는다(되먹임 없음).
+  // 정리 대상 영역(PRUNE_ROOTS)만 보고, 속성이 실제로 켜지거나 꺼질 때만 다시 계산한다
+  // (hidden = true 를 같은 값으로 다시 쓰는 경우는 건너뛴다). 다시 설치하면 이전 관찰자는 해제한다.
+  let pruneQueued = false;
+  hiddenObserver?.disconnect();
+  hiddenObserver = new MutationObserver((records) => {
+    const changed = records.some((r) => (r.oldValue === null) === (r.target as Element).hasAttribute('hidden'));
+    if (!changed || pruneQueued) return;
+    pruneQueued = true;
+    queueMicrotask(() => { pruneQueued = false; pruneAll(); });
+  });
+  for (const root of document.querySelectorAll(PRUNE_ROOTS)) {
+    hiddenObserver.observe(root, { subtree: true, attributes: true, attributeFilter: ['hidden'], attributeOldValue: true });
+  }
 
   const fonts = new PpmHostFonts();
   opts.setFontProvider(fonts);

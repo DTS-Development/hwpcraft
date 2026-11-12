@@ -118,6 +118,7 @@ import { installEmbedRuntime } from '@/embed/runtime';
 import { PPM_HOST } from '@/ppm/host-mode';
 import { LOCKED_COMMAND_IDS as PPM_HOST_LOCKED_FILE_COMMAND_IDS } from '@/ppm/command-policy';
 import { installPpmHost } from '@/ppm/host-install';
+import { ZOOM_SLIDER_COMMAND as PPM_ZOOM_SLIDER_COMMAND, ZOOM_IN_COMMAND as PPM_ZOOM_IN_COMMAND, ZOOM_OUT_COMMAND as PPM_ZOOM_OUT_COMMAND } from '@/ppm/control-commands';
 import { subscribeFieldChanges } from '@/embed/field-events';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import { enrichFontDecisionTrace } from '@/core/font-decision-trace';
@@ -809,6 +810,8 @@ async function initialize(): Promise<void> {
 
     // InputHandler에 커맨드 디스패처 및 컨텍스트 메뉴 주입
     inputHandler.setDispatcher(dispatcher);
+    // Ctrl+휠 확대·축소도 메뉴의 확대·축소 명령과 같은 정책을 따른다.
+    canvasView?.getViewportManager().setZoomInputGate((direction) => dispatcher.isHostAllowed(direction === 'in' ? PPM_ZOOM_IN_COMMAND : PPM_ZOOM_OUT_COMMAND));
     inputHandler.setContextMenu(new ContextMenu(dispatcher, registry));
     inputHandler.setCommandPalette(new CommandPalette(registry, dispatcher));
     inputHandler.setCellSelectionRenderer(
@@ -1184,13 +1187,16 @@ function setupZoomControls(): void {
   zoomOut.addEventListener('click', () => {
     dispatcher.dispatch('view:zoom-out');
   });
+  // 가로바는 명령 정의를 거치지 않으므로 호스트 정책(대응표의 view:zoom-dialog)을 직접 확인한다.
   zoomRange.addEventListener('input', () => {
+    if (!dispatcher.isHostAllowed(PPM_ZOOM_SLIDER_COMMAND)) return;
     const percent = zoomSliderPositionToPercent(Number(zoomRange.value));
     zoomRange.value = String(percentToZoomSliderPosition(percent));
     zoomRange.setAttribute('aria-valuetext', `${percent}%`);
     vm.setZoom(percent / 100);
   });
   zoomRange.addEventListener('keydown', (event) => {
+    if (!dispatcher.isHostAllowed(PPM_ZOOM_SLIDER_COMMAND)) return;
     const current = Math.round(vm.getZoom() * 100);
     let next: number | null = null;
     switch (event.key) {

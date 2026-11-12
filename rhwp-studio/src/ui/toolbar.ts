@@ -7,6 +7,12 @@ import { userSettings } from '@/core/user-settings';
 import type { FontSet } from '@/core/user-settings';
 import { getHostFontFamilies, getLocalFonts } from '@/core/local-fonts';
 import { PPM_HOST } from '@/ppm/host-mode';
+import { emitIfHostAllowed } from '@/ppm/guarded-emit';
+import {
+  CHAR_CONTROL_COMMAND,
+  FONT_SIZE_DOWN_COMMAND,
+  FONT_SIZE_UP_COMMAND,
+} from '@/ppm/control-commands';
 
 import { t } from '../i18n/index.ts';
 type FontMenuCategory = 'all' | 'current' | 'document' | 'fontSets' | 'system';
@@ -119,6 +125,19 @@ export class Toolbar {
     eventBus.on('local-fonts-changed', () => {
       this.refreshFontDropdown();
     });
+  }
+
+  /**
+   * 명령 정의를 거치지 않고 'format-char' 를 직접 내보내는 조작 요소의 공통 출구.
+   * 호스트 정책이 그 요소가 묶인 명령(control-commands.ts)을 껐다면 내보내지 않는다.
+   */
+  private emitFormatChar(commandId: string, props: CharProperties): void {
+    emitIfHostAllowed(this.dispatcher, this.eventBus, commandId, 'format-char', props);
+  }
+
+  /** 형광펜 색 선택도 같은 정책(글자 모양 명령)을 따른다. 연속 형광펜 종료(highlight-pen-exit)는 막지 않는다. */
+  private emitHighlightPick(color: string): void {
+    emitIfHostAllowed(this.dispatcher, this.eventBus, CHAR_CONTROL_COMMAND, 'highlight-pick', color);
   }
 
   /** B/I/U/S 토글 버튼 클릭 이벤트 → 커맨드 디스패치 */
@@ -288,7 +307,7 @@ export class Toolbar {
         // 전체 언어 일괄 적용
         const fontId = this.wasm.findOrCreateFontId(name);
         if (fontId >= 0) {
-          this.eventBus.emit('format-char', { fontId } as CharProperties);
+          this.emitFormatChar(CHAR_CONTROL_COMMAND, { fontId } as CharProperties);
         }
       } else {
         // 특정 언어만 적용 (fontIds 배열)
@@ -306,7 +325,7 @@ export class Toolbar {
               ids.push(this.wasm.findOrCreateFontIdForLang(i, existingName));
             }
           }
-          this.eventBus.emit('format-char', { fontIds: ids } as CharProperties);
+          this.emitFormatChar(CHAR_CONTROL_COMMAND, { fontIds: ids } as CharProperties);
         }
       }
     });
@@ -320,11 +339,12 @@ export class Toolbar {
     this.fontSize.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
+        if (!this.dispatcher.isHostAllowed(CHAR_CONTROL_COMMAND)) return;
         const pt = parseFloat(this.fontSize.value);
         if (!isNaN(pt) && pt > 0) {
           const clampedPt = Math.min(4096, Math.max(1, pt));
           this.fontSize.value = String(clampedPt);
-          this.eventBus.emit('format-char', { fontSize: Math.round(clampedPt * 100) } as CharProperties);
+          this.emitFormatChar(CHAR_CONTROL_COMMAND, { fontSize: Math.round(clampedPt * 100) } as CharProperties);
         }
       }
     });
@@ -332,18 +352,20 @@ export class Toolbar {
     // 크기 증감 버튼 (char-shape-dialog.ts의 fontSize 범위 100~409600과 동일한 1~4096pt로 clamp)
     this.btnSizeUp.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      if (!this.dispatcher.isHostAllowed(FONT_SIZE_UP_COMMAND)) return;
       const pt = parseFloat(this.fontSize.value) || 10;
       const newPt = Math.min(4096, pt + 1);
       this.fontSize.value = String(newPt);
-      this.eventBus.emit('format-char', { fontSize: Math.round(newPt * 100) } as CharProperties);
+      this.emitFormatChar(FONT_SIZE_UP_COMMAND, { fontSize: Math.round(newPt * 100) } as CharProperties);
     });
 
     this.btnSizeDown.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      if (!this.dispatcher.isHostAllowed(FONT_SIZE_DOWN_COMMAND)) return;
       const pt = parseFloat(this.fontSize.value) || 10;
       const newPt = Math.max(1, pt - 1);
       this.fontSize.value = String(newPt);
-      this.eventBus.emit('format-char', { fontSize: Math.round(newPt * 100) } as CharProperties);
+      this.emitFormatChar(FONT_SIZE_DOWN_COMMAND, { fontSize: Math.round(newPt * 100) } as CharProperties);
     });
   }
 
@@ -358,9 +380,10 @@ export class Toolbar {
     });
 
     this.colorPicker.addEventListener('input', () => {
+      if (!this.dispatcher.isHostAllowed(CHAR_CONTROL_COMMAND)) return;
       const color = this.colorPicker.value;
       this.colorBar.style.background = color;
-      this.eventBus.emit('format-char', { textColor: color } as CharProperties);
+      this.emitFormatChar(CHAR_CONTROL_COMMAND, { textColor: color } as CharProperties);
     });
   }
 
@@ -389,7 +412,7 @@ export class Toolbar {
     btnNone.addEventListener('click', () => {
       this.highlightColor = '#ffffff';
       this.highlightBar.style.background = '#ffffff';
-      this.eventBus.emit('highlight-pick', '#ffffff');
+      this.emitHighlightPick('#ffffff');
       this.highlightDropdown.classList.remove('open');
     });
     const btnOther = document.createElement('button');
@@ -409,7 +432,7 @@ export class Toolbar {
     hiddenPicker.addEventListener('input', () => {
       this.highlightColor = hiddenPicker.value;
       this.highlightBar.style.background = this.highlightColor;
-      this.eventBus.emit('highlight-pick', this.highlightColor);
+      this.emitHighlightPick(this.highlightColor);
       this.highlightDropdown.classList.remove('open');
     });
     actRow.appendChild(btnNone);
@@ -429,7 +452,7 @@ export class Toolbar {
           e.preventDefault();
           this.highlightColor = color;
           this.highlightBar.style.background = color;
-          this.eventBus.emit('highlight-pick', color);
+          this.emitHighlightPick(color);
           this.highlightDropdown.classList.remove('open');
         });
         rowEl.appendChild(swatch);
@@ -954,6 +977,6 @@ export class Toolbar {
       const fontName = fs[langKeys[i]];
       ids.push(this.wasm.findOrCreateFontIdForLang(i, fontName));
     }
-    this.eventBus.emit('format-char', { fontIds: ids } as CharProperties);
+    this.emitFormatChar(CHAR_CONTROL_COMMAND, { fontIds: ids } as CharProperties);
   }
 }
