@@ -240,11 +240,26 @@ test('무작위 정책에서도 구분선·묶음·끈 요소 규칙이 지켜�
         return total > 0 && shown === 0;
       };
       if (n.children.some((c) => !matches(c, SEPARATOR_SELECTOR) && gone(c))) {
-        const seq = n.children.filter((c) => !c.hidden && !(!matches(c, SEPARATOR_SELECTOR) && gone(c)));
-        seq.forEach((c, i) => {
-          if (!matches(c, SEPARATOR_SELECTOR)) return;
-          assert.ok(i > 0 && i < seq.length - 1, `round ${round}: 가장자리 구분선`);
-          assert.ok(!matches(seq[i - 1], SEPARATOR_SELECTOR), `round ${round}: 연속 구분선`);
+        // 구분선 양쪽 중 한쪽에 항목이 있었는데 보이는 것이 하나도 없으면 안 된다.
+        // 원래부터 목록 끝에 있던 구분선(뒤에 항목이 아예 없음)은 앞에 보이는 항목이 있으면 남는다.
+        // 사이 항목이 숨어서 구분선이 연달아 붙어서도 안 된다.
+        const items = n.children.map((c) => ({ c, sep: matches(c, SEPARATOR_SELECTOR) }));
+        const shownItem = (c: HNode) => !gone(c) && c.attrs.hidden === undefined;
+        let lastShownSep = -1;
+        let goneBetween = false;
+        let visibleBetween = false;
+        items.forEach(({ c, sep }, i) => {
+          if (!sep) {
+            if (shownItem(c)) { visibleBetween = true; goneBetween = false; } else if (lastShownSep >= 0) goneBetween = true;
+            return;
+          }
+          if (c.hidden) return;
+          const before = items.slice(0, i).filter((o) => !o.sep);
+          const after = items.slice(i + 1).filter((o) => !o.sep);
+          assert.ok(!(before.length > 0 && !before.some((o) => shownItem(o.c))), `round ${round}: 앞쪽이 빈 구분선`);
+          assert.ok(!(after.length > 0 && !after.some((o) => shownItem(o.c))), `round ${round}: 뒤쪽이 빈 구분선`);
+          if (lastShownSep >= 0 && !visibleBetween) assert.ok(!goneBetween, `round ${round}: 연속 구분선`);
+          lastShownSep = i; goneBetween = false; visibleBetween = false;
         });
       }
       // 3) 보이는 묶음에는 보이는 조작 요소가 하나는 있다(조작 요소가 아예 없는 묶음은 대상 아님).
@@ -482,4 +497,30 @@ test('문맥 전용 묶음 관찰자는 정리 영역만, 실제로 바뀔 때�
   assert.match(src, /attributeOldValue: true/);
   assert.match(src, /document\.querySelectorAll\(PRUNE_ROOTS\)\) \{\s*hiddenObserver\.observe\(/);
   assert.doesNotMatch(src, /\.observe\(document\.body/);
+});
+
+test('회전 묶음 버튼 일부만 꺼도 묶음 끝 구분선은 남는다', () => {
+  const root = bootTree(LOCKED);
+  runPrune(root, { 'insert:flip-vert': false });
+  let rotate: HNode | null = null;
+  walk(root, (n) => { if (n.classes.has('tb-rotate-group')) rotate = n; });
+  assert.ok(rotate);
+  const seps = rotate!.children.filter((c) => c.classes.has('tb-sep'));
+  assert.equal(seps.length, 1);
+  assert.equal(seps[0].hidden, false, '묶음 끝 구분선이 사라졌다');
+  assert.equal(rotate!.children.find((c) => c.attrs['data-cmd'] === 'insert:flip-vert')!.hidden, true);
+});
+
+test('edit:cut 만 켜면 도구 상자에 보이는 구분선이 하나도 남지 않는다', () => {
+  const root = bootTree(LOCKED);
+  runPrune(root, { ...allOff(), 'edit:cut': true });
+  const left: string[] = [];
+  walk(root, (n) => {
+    if (n.classes.has('tb-sep') && !effectivelyHidden(n)) {
+      // 편집기가 문맥에 따라 숨겨 둔 묶음 안의 구분선은 보이지 않는다.
+      for (let p: HNode | null = n.parent; p; p = p.parent) if (p.attrs.hidden !== undefined) return;
+      left.push(`${n.parent?.classes ? [...n.parent.classes].join('.') : ''}`);
+    }
+  });
+  assert.deepEqual(left, []);
 });

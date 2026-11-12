@@ -36,41 +36,52 @@ export interface PruneRules<N extends PruneNode<N>> {
   isContextHidden?(el: N): boolean;
 }
 
-interface Tally { has: boolean; vis: number; hidden: boolean }
+interface Tally { has: boolean; vis: number; hidden: boolean; context?: boolean }
 
 /** root 아래를 정리한다. 호출할 때마다 모든 판정을 새로 계산해 켜고 끈다. */
 export function pruneChrome<N extends PruneNode<N>>(root: N, rules: PruneRules<N>): void {
   const visitChildren = (el: N): Tally => {
     let has = false;
     let vis = 0;
-    const kids: { el: N; hidden: boolean; sep: boolean }[] = [];
+    // gone: 지금 화면에서 빠진 항목(정책으로 숨음, 또는 편집기가 문맥에 따라 숨겨 둠), policy: 그중 정책 때문에 숨은 것.
+    const kids: { el: N; gone: boolean; policy: boolean; sep: boolean }[] = [];
     for (let i = 0; i < el.children.length; i++) {
       const child = el.children[i];
-      if (rules.isSeparator(child)) { kids.push({ el: child, hidden: false, sep: true }); continue; }
-      if (rules.isTrigger(child)) { kids.push({ el: child, hidden: false, sep: false }); continue; }
+      if (rules.isSeparator(child)) { kids.push({ el: child, gone: false, policy: false, sep: true }); continue; }
+      if (rules.isTrigger(child)) { kids.push({ el: child, gone: false, policy: false, sep: false }); continue; }
       const r = visit(child);
       if (r.has) has = true;
       vis += r.vis;
-      kids.push({ el: child, hidden: r.hidden, sep: false });
+      kids.push({ el: child, gone: r.hidden || r.context === true, policy: r.hidden, sep: false });
     }
-    // 구분선: 이 형제 목록에서 정책 때문에 숨은 항목이 하나도 없으면 원래 배치 그대로 둔다
+    // 구분선: 이 목록에 정책 때문에 숨은 항목이 하나도 없으면 원래 배치 그대로 둔다
     // (회전 묶음 끝의 구분선처럼 원래부터 가장자리에 있는 것도 건드리지 않는다).
-    // 숨은 항목이 있을 때만: 앞에 보이는 항목이 있고 직전이 구분선이 아닐 때 남기고, 끝에 남은 구분선은 숨긴다.
-    if (!kids.some((k) => !k.sep && k.hidden)) {
+    // 숨은 항목이 있으면: 구분선 양쪽 중 한쪽에 항목이 있었는데 보이는 것이 하나도 없으면 숨기고,
+    // 사이의 항목이 숨어서 구분선이 연달아 붙게 된 경우 뒤의 것을 숨긴다.
+    // 원래부터 목록 끝에 있던 구분선(뒤에 항목이 아예 없음)은 앞에 보이는 항목이 있으면 둔다.
+    if (!kids.some((k) => !k.sep && k.policy)) {
       for (const k of kids) if (k.sep) rules.setHidden(k.el, false);
       return { has, vis, hidden: false };
     }
-    let prev: 'none' | 'item' | 'sep' = 'none';
-    let lastSep: N | null = null;
-    for (const k of kids) {
-      if (k.sep) {
-        if (prev === 'item') { rules.setHidden(k.el, false); prev = 'sep'; lastSep = k.el; }
-        else rules.setHidden(k.el, true);
-      } else if (!k.hidden) {
-        prev = 'item';
+    let seenAny = false;
+    let seenVisible = false;
+    let prevShownSep = false; // 직전에 남긴 구분선 이후 보이는 항목이 없다
+    let goneSinceSep = false;
+    for (let i = 0; i < kids.length; i++) {
+      const k = kids[i];
+      if (!k.sep) {
+        seenAny = true;
+        if (!k.gone) { seenVisible = true; prevShownSep = false; goneSinceSep = false; }
+        else if (prevShownSep) goneSinceSep = true;
+        continue;
       }
+      const after = kids.slice(i + 1).filter((o) => !o.sep);
+      const afterAny = after.length > 0;
+      const afterVisible = after.some((o) => !o.gone);
+      const hide = (seenAny && !seenVisible) || (afterAny && !afterVisible) || (prevShownSep && goneSinceSep);
+      rules.setHidden(k.el, hide);
+      if (!hide) { prevShownSep = true; goneSinceSep = false; }
     }
-    if (prev === 'sep' && lastSep) rules.setHidden(lastSep, true);
     return { has, vis, hidden: false };
   };
 
@@ -90,7 +101,7 @@ export function pruneChrome<N extends PruneNode<N>>(root: N, rules: PruneRules<N
     if (rules.isContextHidden?.(el)) {
       // 숨김은 편집기 몫이다. 우리 표시는 걸지 않고, 구분선 판정에서는 원래 배치대로 보이는 항목으로 둔다.
       rules.setHidden(el, false);
-      return { has: t.has, vis: 0, hidden: false };
+      return { has: t.has, vis: 0, hidden: false, context: true };
     }
     const hide = t.has && t.vis === 0;
     rules.setHidden(el, hide);
