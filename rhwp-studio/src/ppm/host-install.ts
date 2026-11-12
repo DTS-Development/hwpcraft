@@ -72,8 +72,11 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
     isSeparator: (el) => el.matches(SEPARATOR_SELECTOR),
     isTrigger: (el) => el.matches(TRIGGER_SELECTOR),
     setHidden: (el, hidden) => { el.toggleAttribute(HIDE_ATTR, hidden); },
+    isContextHidden: (el) => el.hasAttribute('hidden'),
   };
   let boundControls = new Map<Element, string>();
+
+  const pruneAll = () => { for (const root of document.querySelectorAll(PRUNE_ROOTS)) pruneChrome(root, pruneRules); };
 
   // 막힌 명령의 메뉴·도구막대 표면을 숨긴다(실행은 게이트가 따로 막는다).
   const refreshHiddenSurfaces = () => {
@@ -86,8 +89,16 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
     for (const b of CONTROL_BINDINGS) {
       for (const el of document.querySelectorAll(b.selector)) boundControls.set(el, b.commandId);
     }
-    for (const root of document.querySelectorAll(PRUNE_ROOTS)) pruneChrome(root, pruneRules);
+    pruneAll();
   };
+  // 편집기가 문맥 전용 묶음(회전·머리말·각주)을 hidden 으로 켜고 끌 때 빈 띠 판정을 다시 한다.
+  // 우리 숨김은 data-ppm-hide 라 이 관찰을 다시 부르지 않는다(되먹임 없음).
+  let pruneQueued = false;
+  new MutationObserver(() => {
+    if (pruneQueued) return;
+    pruneQueued = true;
+    queueMicrotask(() => { pruneQueued = false; pruneAll(); });
+  }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
 
   const fonts = new PpmHostFonts();
   opts.setFontProvider(fonts);

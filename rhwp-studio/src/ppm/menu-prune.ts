@@ -27,6 +27,13 @@ export interface PruneRules<N extends PruneNode<N>> {
   /** 컨테이너를 여는 단추. 혼자서는 컨테이너를 보이게 하지 못한다(하위가 다 막히면 컨테이너째 숨는다). */
   isTrigger(el: N): boolean;
   setHidden(el: N, hidden: boolean): void;
+  /**
+   * 문맥에 따라 편집기가 직접 숨겨 둔 묶음(개체 선택 때만 뜨는 회전 묶음 등)이면 true.
+   * 이런 묶음은 허용돼 있어도 지금 보이지 않으므로 "보이는 자식"으로 세지 않는다 —
+   * 그러지 않으면 문맥 전용 묶음만 남았을 때 도구 상자가 빈 띠로 남는다.
+   * 판정은 호출 시점의 상태이므로, 상태가 바뀌면 호출 쪽이 pruneChrome 을 다시 불러야 한다.
+   */
+  isContextHidden?(el: N): boolean;
 }
 
 interface Tally { has: boolean; vis: number; hidden: boolean }
@@ -71,6 +78,10 @@ export function pruneChrome<N extends PruneNode<N>>(root: N, rules: PruneRules<N
     }
     const t = visitChildren(el);
     if (!rules.isContainer(el)) return t;
+    if (rules.isContextHidden?.(el)) {
+      rules.setHidden(el, false); // 숨김은 편집기 몫이다. 우리 표시는 걸어 두지 않는다.
+      return { has: t.has, vis: 0, hidden: true };
+    }
     const hide = t.has && t.vis === 0;
     rules.setHidden(el, hide);
     return { has: t.has, vis: t.vis, hidden: hide };

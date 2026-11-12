@@ -101,6 +101,7 @@ function runPrune(root: HNode, overrides: CommandOverrides): void {
     isSeparator: (el) => matches(el, SEPARATOR_SELECTOR),
     isTrigger: (el) => matches(el, TRIGGER_SELECTOR),
     setHidden: (el, hidden) => { el.hidden = hidden; },
+    isContextHidden: (el) => el.attrs.hidden !== undefined,
   };
   for (const id of ['studio-header', 'status-bar']) {
     walk(root, (n) => { if (n.attrs.id === id) pruneChrome(n, rules); });
@@ -230,7 +231,8 @@ test('무작위 정책에서도 구분선·묶음·끈 요소 규칙이 지켜�
         assert.ok(!matches(seq[i - 1], SEPARATOR_SELECTOR), `round ${round}: 연속 구분선`);
       });
       // 3) 보이는 묶음에는 보이는 조작 요소가 하나는 있다(조작 요소가 아예 없는 묶음은 대상 아님).
-      if (matches(n, CONTAINER_SELECTOR) && !bound.has(n) && !n.attrs['data-cmd']) {
+      // 편집기가 직접 숨겨 두는 문맥 전용 묶음(hidden)은 우리 판정 밖이다.
+      if (matches(n, CONTAINER_SELECTOR) && !bound.has(n) && !n.attrs['data-cmd'] && n.attrs.hidden === undefined) {
         let total = 0;
         let shown = 0;
         walk(n, (c) => {
@@ -326,4 +328,31 @@ test('입력 처리기는 format-char 를 직접 내보내지 않고, 브라우�
   for (const id of ['edit:copy', 'edit:cut', 'edit:paste']) {
     assert.match(src, new RegExp(`!this\\.dispatcher\\.isHostAllowed\\('${id}'\\)\\) \\{ e\\.preventDefault\\(\\)`));
   }
+});
+
+test('문맥 전용(hidden) 묶음만 허용돼 있으면 도구 상자·서식 막대는 빈 띠로 남지 않는다', () => {
+  const root = bootTree(LOCKED);
+  // 회전·머리말·각주 묶음(편집기가 hidden 으로 숨겨 둔 것)에 속한 명령만 켜고 나머지는 모두 끈다.
+  const ctxIds = new Set<string>();
+  walk(root, (n) => {
+    if (n.attrs.hidden !== undefined && n.classes.has('tb-group')) walk(n, (c) => { if (c.attrs['data-cmd']) ctxIds.add(c.attrs['data-cmd']); });
+  });
+  // 일반 묶음에도 있는 명령(각주·미주)은 빼 — 그 묶음이 보이게 되면 띠가 비지 않는다.
+  walk(root, (n) => {
+    const cmd = n.attrs['data-cmd'];
+    if (!cmd) return;
+    for (let p: HNode | null = n; p; p = p.parent) if (p.attrs.hidden !== undefined) return;
+    ctxIds.delete(cmd);
+  });
+  assert.ok(ctxIds.size > 0);
+  const overrides = Object.fromEntries(allCommandIds().map((id) => [id, ctxIds.has(id)]));
+  runPrune(root, overrides);
+  const strip = (id: string): HNode => { let r: HNode | null = null; walk(root, (n) => { if (n.attrs.id === id) r = n; }); assert.ok(r); return r!; };
+  assert.equal(strip('icon-toolbar').hidden, true, '도구 상자가 빈 띠로 남았다');
+  assert.equal(strip('style-bar').hidden, true, '서식 막대가 빈 띠로 남았다');
+  // 문맥 전용 묶음 자체에는 우리 숨김 표시가 걸리지 않는다(편집기가 hidden 으로 켜고 끈다).
+  walk(root, (n) => { if (n.attrs.hidden !== undefined && n.classes.has('tb-group')) assert.equal(n.hidden, false); });
+  // 일반 묶음 하나가 허용되면 띠는 다시 보인다.
+  runPrune(root, { ...overrides, 'view:ctrl-mark': true });
+  assert.equal(strip('icon-toolbar').hidden, false);
 });
