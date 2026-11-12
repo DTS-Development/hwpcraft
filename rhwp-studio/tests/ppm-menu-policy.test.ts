@@ -5,7 +5,7 @@ import { codeOnly } from './support/source-guard.ts';
 import { CommandDispatcher } from '../src/command/dispatcher.ts';
 import { isCommandAllowed, type CommandOverrides } from '../src/ppm/command-policy.ts';
 import {
-  CONTROL_BINDINGS, CHAR_CONTROL_COMMAND, FONT_SIZE_UP_COMMAND, FONT_SIZE_DOWN_COMMAND, ZOOM_SLIDER_COMMAND,
+  CONTROL_BINDINGS, CHAR_CONTROL_COMMAND, FONT_SIZE_UP_COMMAND, FONT_SIZE_DOWN_COMMAND, ZOOM_SLIDER_COMMAND, ZOOM_IN_COMMAND, ZOOM_OUT_COMMAND,
 } from '../src/ppm/control-commands.ts';
 import {
   CONTAINER_SELECTOR, SEPARATOR_SELECTOR, TRIGGER_SELECTOR, pruneChrome, type PruneRules,
@@ -222,14 +222,31 @@ test('무작위 정책에서도 구분선·묶음·끈 요소 규칙이 지켜�
       // 1) 끈 조작 요소는 숨는다.
       const cmd = n.attrs['data-cmd'] || bound.get(n);
       if (cmd && !isCommandAllowed(cmd, overrides)) assert.ok(effectivelyHidden(n), `round ${round}: ${cmd} 가 남았다`);
-      // 2) 보이는 형제 사이의 구분선 규칙: 맨 앞·맨 끝·연속이 없다.
       if (effectivelyHidden(n)) return;
-      const seq = n.children.filter((c) => !c.hidden);
-      seq.forEach((c, i) => {
-        if (!matches(c, SEPARATOR_SELECTOR)) return;
-        assert.ok(i > 0 && i < seq.length - 1, `round ${round}: 가장자리 구분선`);
-        assert.ok(!matches(seq[i - 1], SEPARATOR_SELECTOR), `round ${round}: 연속 구분선`);
-      });
+      // 2) 보이는 형제 사이의 구분선 규칙: 숨은 형제가 하나라도 있는 목록에서는 맨 앞·맨 끝·연속이 없다.
+      //    (숨은 형제가 없으면 원래 배치 그대로라 가장자리 구분선도 그대로 둔다.)
+      //    비어 있다는 판정은 우리 표시뿐 아니라 "정책 요소가 모두 숨은 감싸개"도 포함한다.
+      const gone = (c: HNode): boolean => {
+        if (c.hidden) return true;
+        if (matches(c, SEPARATOR_SELECTOR) || c.attrs.hidden !== undefined) return false;
+        let total = 0;
+        let shown = 0;
+        walk(c, (d) => {
+          const cc = d.attrs['data-cmd'] || bound.get(d);
+          if (!cc) return;
+          total += 1;
+          if (!effectivelyHidden(d)) shown += 1;
+        });
+        return total > 0 && shown === 0;
+      };
+      if (n.children.some((c) => !matches(c, SEPARATOR_SELECTOR) && gone(c))) {
+        const seq = n.children.filter((c) => !c.hidden && !(!matches(c, SEPARATOR_SELECTOR) && gone(c)));
+        seq.forEach((c, i) => {
+          if (!matches(c, SEPARATOR_SELECTOR)) return;
+          assert.ok(i > 0 && i < seq.length - 1, `round ${round}: 가장자리 구분선`);
+          assert.ok(!matches(seq[i - 1], SEPARATOR_SELECTOR), `round ${round}: 연속 구분선`);
+        });
+      }
       // 3) 보이는 묶음에는 보이는 조작 요소가 하나는 있다(조작 요소가 아예 없는 묶음은 대상 아님).
       // 편집기가 직접 숨겨 두는 문맥 전용 묶음(hidden)은 우리 판정 밖이다.
       if (matches(n, CONTAINER_SELECTOR) && !bound.has(n) && !n.attrs['data-cmd'] && n.attrs.hidden === undefined) {
@@ -281,11 +298,10 @@ test('dispatcher.isHostAllowed 는 게이트만 본다', () => {
 
 test('이벤트를 직접 내보내는 서식 막대 요소는 숨김과 같은 명령 id 로 실행을 막는다', () => {
   const toolbar = codeOnly(read('src/ui/toolbar.ts'));
-  // format-char·highlight-pick 은 게이트를 지나는 출구 함수 안에서만 내보낸다.
-  assert.equal((toolbar.match(/emit\('format-char'/g) ?? []).length, 1);
-  assert.equal((toolbar.match(/emit\('highlight-pick'/g) ?? []).length, 1);
-  assert.match(toolbar, /private emitFormatChar\(commandId: string, props: CharProperties\): void \{\s*if \(!this\.dispatcher\.isHostAllowed\(commandId\)\) return;/);
-  assert.match(toolbar, /private emitHighlightPick\(color: string\): void \{\s*if \(!this\.dispatcher\.isHostAllowed\(CHAR_CONTROL_COMMAND\)\) return;/);
+  // format-char·highlight-pick 은 게이트를 지나는 출구(guarded-emit.ts) 안에서만 내보낸다.
+  assert.equal((toolbar.match(/emit\('(format-char|highlight-pick)'/g) ?? []).length, 0);
+  assert.match(toolbar, /private emitFormatChar\(commandId: string, props: CharProperties\): void \{\s*emitIfHostAllowed\(this\.dispatcher, this\.eventBus, commandId, 'format-char', props\);/);
+  assert.match(toolbar, /private emitHighlightPick\(color: string\): void \{\s*emitIfHostAllowed\(this\.dispatcher, this\.eventBus, CHAR_CONTROL_COMMAND, 'highlight-pick', color\);/);
   // 요소별 실행 id: 글꼴·언어 선택(대표 글꼴 세트 포함)·크기 입력·글자 색은 글자 모양, 화살표는 각자 명령.
   assert.equal((toolbar.match(/emitFormatChar\(CHAR_CONTROL_COMMAND,/g) ?? []).length, 5);
   assert.match(toolbar, /emitFormatChar\(FONT_SIZE_UP_COMMAND,/);
@@ -355,4 +371,115 @@ test('문맥 전용(hidden) 묶음만 허용돼 있으면 도구 상자·서식 
   // 일반 묶음 하나가 허용되면 띠는 다시 보인다.
   runPrune(root, { ...overrides, 'view:ctrl-mark': true });
   assert.equal(strip('icon-toolbar').hidden, false);
+});
+
+test('모두 켜면 구분선을 포함해 우리가 숨기는 것이 하나도 없다(원래 화면과 같다)', () => {
+  const root = bootTree(LOCKED);
+  runPrune(root, Object.fromEntries(allCommandIds().map((id) => [id, true])));
+  const hidden: string[] = [];
+  walk(root, (n) => { if (n.hidden) hidden.push(`${n.tag}.${[...n.classes].join('.')}#${n.attrs['data-cmd'] ?? n.attrs.id ?? ''}`); });
+  assert.deepEqual(hidden, []);
+});
+
+test('기본 정책에서는 기본으로 꺼진 명령 말고는 구분선도 숨지 않는다', () => {
+  const root = bootTree(LOCKED);
+  runPrune(root, {});
+  const seps: string[] = [];
+  walk(root, (n) => {
+    if (n.hidden && matches(n, SEPARATOR_SELECTOR) && n.parent) {
+      // 구분선이 숨었다면 같은 목록에 정책으로 숨은 항목이 있어야 한다.
+      const sibHidden = n.parent.children.some((c) => c !== n && !matches(c, SEPARATOR_SELECTOR) && c.hidden);
+      if (!sibHidden) seps.push(`${[...n.classes].join('.')}`);
+    }
+  });
+  assert.deepEqual(seps, []);
+});
+
+test('보이는 메뉴 제목이 없으면 메뉴 막대도 빈 띠로 남지 않는다', () => {
+  const root = bootTree(LOCKED);
+  const bar = (): HNode => { let r: HNode | null = null; walk(root, (n) => { if (n.attrs.id === 'menu-bar') r = n; }); assert.ok(r); return r!; };
+  runPrune(root, allOff());
+  assert.equal(bar().hidden, true);
+  runPrune(root, { ...allOff(), 'edit:cut': true });
+  assert.equal(bar().hidden, false);
+  runPrune(root, {});
+  assert.equal(bar().hidden, false);
+});
+
+test('Ctrl+휠 확대·축소는 view:zoom-in·zoom-out 정책을 확인한다', () => {
+  const vm = codeOnly(read('src/view/viewport-manager.ts'));
+  assert.match(vm, /setZoomInputGate\(gate/);
+  // 확대 방향을 판정한 뒤, 배율을 바꾸는 호출보다 먼저 막는다.
+  const gateAt = vm.indexOf('this.zoomInputGate(boundedDelta < 0');
+  assert.ok(gateAt > 0 && gateAt < vm.indexOf('this.applySmoothZoomTo(target, anchor'));
+  const main = codeOnly(read('src/main.ts'));
+  assert.match(main, /setZoomInputGate\(\(direction\) => dispatcher\.isHostAllowed\(direction === 'in' \? PPM_ZOOM_IN_COMMAND : PPM_ZOOM_OUT_COMMAND\)\)/);
+  assert.equal(ZOOM_IN_COMMAND, 'view:zoom-in');
+  assert.equal(ZOOM_OUT_COMMAND, 'view:zoom-out');
+  assert.ok(commandSource.includes("id: 'view:zoom-in'") && commandSource.includes("id: 'view:zoom-out'"));
+});
+
+test('끈 복사·잘라내기·붙여넣기는 개체 선택 처리보다 먼저 막힌다', () => {
+  const src = codeOnly(read('src/engine/input-handler.ts'));
+  for (const [fn, id, call] of [['onCopy', 'edit:copy', 'return _keyboard.onCopy'], ['onCut', 'edit:cut', '_keyboard.onCut'], ['onPaste', 'edit:paste', '_keyboard.onPaste']]) {
+    const start = src.indexOf(`private ${fn}(`);
+    assert.ok(start > 0, fn);
+    const guard = src.indexOf(`isHostAllowed('${id}')`, start);
+    const body = src.indexOf(call, start);
+    assert.ok(guard > 0 && guard < body, `${fn}: 가드가 처리 호출보다 앞에 있어야 한다`);
+  }
+  // 개체(그림·표) 선택 중 Ctrl+C/X 키도 같은 명령을 dispatcher 로 부른다.
+  const kb = codeOnly(read('src/engine/input-handler-keyboard.ts'));
+  assert.ok((kb.match(/dispatcher\?\.dispatch\('edit:copy'\)/g) ?? []).length >= 2);
+  assert.ok((kb.match(/dispatcher\?\.dispatch\('edit:cut'\)/g) ?? []).length >= 2);
+});
+
+// ── Toolbar 가 쓰는 출구의 동작 시험: 가짜 dispatcher·eventBus 로 발행 횟수를 센다 ──
+test('서식 직접 발행 출구: 막힌 명령이면 format-char·highlight-pick 을 내보내지 않고, 허용이면 내보낸다', async () => {
+  const { emitIfHostAllowed } = await import('../src/ppm/guarded-emit.ts');
+  const emitted: string[] = [];
+  const bus = { emit: (name: string) => { emitted.push(name); } };
+  const dispatcherOf = (denied: ReadonlySet<string>) => ({ isHostAllowed: (id: string) => !denied.has(id) });
+  const denied = dispatcherOf(new Set([CHAR_CONTROL_COMMAND, FONT_SIZE_UP_COMMAND, FONT_SIZE_DOWN_COMMAND]));
+  assert.equal(emitIfHostAllowed(denied, bus, CHAR_CONTROL_COMMAND, 'format-char', {}), false);
+  assert.equal(emitIfHostAllowed(denied, bus, FONT_SIZE_UP_COMMAND, 'format-char', {}), false);
+  assert.equal(emitIfHostAllowed(denied, bus, FONT_SIZE_DOWN_COMMAND, 'format-char', {}), false);
+  assert.equal(emitIfHostAllowed(denied, bus, CHAR_CONTROL_COMMAND, 'highlight-pick', '#ffff00'), false);
+  assert.deepEqual(emitted, []);
+  const open = dispatcherOf(new Set([CHAR_CONTROL_COMMAND]));
+  assert.equal(emitIfHostAllowed(open, bus, FONT_SIZE_UP_COMMAND, 'format-char', {}), true); // 크기 ▲는 자기 명령을 따른다
+  assert.deepEqual(emitted, ['format-char']);
+});
+
+test('Toolbar 의 모든 서식 직접 발행은 이 출구 두 개를 거친다', () => {
+  const toolbar = codeOnly(read('src/ui/toolbar.ts'));
+  assert.equal((toolbar.match(/eventBus\.emit\('(format-char|highlight-pick)'/g) ?? []).length, 0);
+  assert.equal((toolbar.match(/emitIfHostAllowed\(/g) ?? []).length, 2);
+});
+
+test('컨테이너가 아닌 감싸개도 정책 요소가 모두 숨으면 옆 구분선 판정에서 비어 있는 것으로 센다', () => {
+  type N = { name: string; kind: 'leaf' | 'sep' | 'box' | 'wrap'; blocked?: boolean; children: N[]; hidden?: boolean };
+  const leaf = (name: string, blocked = false): N => ({ name, kind: 'leaf', blocked, children: [] });
+  const sep = (name: string): N => ({ name, kind: 'sep', children: [] });
+  const tree: N = { name: 'root', kind: 'box', children: [
+    { name: 'group', kind: 'box', children: [leaf('x'), sep('s1'), { name: 'wrapper', kind: 'wrap', children: [leaf('y', true)] }] },
+  ] };
+  pruneChrome<N>(tree, {
+    leafBlocked: (el) => (el.kind === 'leaf' ? !!el.blocked : null),
+    isContainer: (el) => el.kind === 'box',
+    isSeparator: (el) => el.kind === 'sep',
+    isTrigger: () => false,
+    setHidden: (el, hidden) => { el.hidden = hidden; },
+  });
+  const find = (n: N, name: string): N | null => (n.name === name ? n : n.children.map((c) => find(c, name)).find(Boolean) ?? null);
+  assert.equal(find(tree, 's1')!.hidden, true, '빈 감싸개 옆의 끝 구분선이 남았다');
+  assert.equal(find(tree, 'wrapper')!.hidden ?? false, false, '감싸개 자체에는 표시를 걸지 않는다');
+});
+
+test('문맥 전용 묶음 관찰자는 정리 영역만, 실제로 바뀔 때만 보고 다시 설치하면 이전 것을 해제한다', () => {
+  const src = codeOnly(read('src/ppm/host-install.ts'));
+  assert.match(src, /hiddenObserver\?\.disconnect\(\)/);
+  assert.match(src, /attributeOldValue: true/);
+  assert.match(src, /document\.querySelectorAll\(PRUNE_ROOTS\)\) \{\s*hiddenObserver\.observe\(/);
+  assert.doesNotMatch(src, /\.observe\(document\.body/);
 });

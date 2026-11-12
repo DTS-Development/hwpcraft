@@ -45,6 +45,9 @@ function showDisconnectedOverlay(): void {
   document.body.appendChild(el);
 }
 
+/** 문맥 전용 묶음의 hidden 변화를 보는 관찰자. 다시 설치되면 이전 것을 해제한다. */
+let hiddenObserver: MutationObserver | null = null;
+
 /** 설치에 성공해 부모와 연결되면 true. */
 export function installPpmHost(opts: HostInstallOptions): boolean {
   document.documentElement.setAttribute('data-ppm-host', PPM_HOST_MARKER);
@@ -93,12 +96,19 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   };
   // 편집기가 문맥 전용 묶음(회전·머리말·각주)을 hidden 으로 켜고 끌 때 빈 띠 판정을 다시 한다.
   // 우리 숨김은 data-ppm-hide 라 이 관찰을 다시 부르지 않는다(되먹임 없음).
+  // 정리 대상 영역(PRUNE_ROOTS)만 보고, 속성이 실제로 켜지거나 꺼질 때만 다시 계산한다
+  // (hidden = true 를 같은 값으로 다시 쓰는 경우는 건너뛴다). 다시 설치하면 이전 관찰자는 해제한다.
   let pruneQueued = false;
-  new MutationObserver(() => {
-    if (pruneQueued) return;
+  hiddenObserver?.disconnect();
+  hiddenObserver = new MutationObserver((records) => {
+    const changed = records.some((r) => (r.oldValue === null) === (r.target as Element).hasAttribute('hidden'));
+    if (!changed || pruneQueued) return;
     pruneQueued = true;
     queueMicrotask(() => { pruneQueued = false; pruneAll(); });
-  }).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['hidden'] });
+  });
+  for (const root of document.querySelectorAll(PRUNE_ROOTS)) {
+    hiddenObserver.observe(root, { subtree: true, attributes: true, attributeFilter: ['hidden'], attributeOldValue: true });
+  }
 
   const fonts = new PpmHostFonts();
   opts.setFontProvider(fonts);

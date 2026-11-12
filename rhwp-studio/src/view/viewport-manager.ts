@@ -41,6 +41,8 @@ export class ViewportManager {
   private onResizeObserverErrorBound: (e: ErrorEvent) => void;
   private eventBus: EventBus;
   private readonly zoomInputSettle: ZoomInputSettle;
+  /** 호스트가 확대/축소 입력을 막을 때 쓴다. 없으면 모두 허용. */
+  private zoomInputGate: ((direction: 'in' | 'out') => boolean) | null = null;
 
   constructor(eventBus: EventBus, settleHost?: ZoomInputSettleHost, quietMs?: number) {
     this.eventBus = eventBus;
@@ -51,6 +53,11 @@ export class ViewportManager {
     this.onWheelBound = this.onWheel.bind(this);
     this.onZoomAnimationFrameBound = this.onZoomAnimationFrame.bind(this);
     this.onResizeObserverErrorBound = this.onResizeObserverError.bind(this);
+  }
+
+  /** Ctrl+휠(트랙패드 핀치 포함) 배율 입력의 허용 여부를 정하는 판정을 건다. null 이면 해제. */
+  setZoomInputGate(gate: ((direction: 'in' | 'out') => boolean) | null): void {
+    this.zoomInputGate = gate;
   }
 
   /** 스크롤 컨테이너에 연결한다 */
@@ -171,6 +178,8 @@ export class ViewportManager {
       Math.min(MAX_WHEEL_DELTA_PX, deltaY),
     );
     if (boundedDelta === 0) return;
+    // 휠을 위로 밀면 확대, 아래로 밀면 축소다(아래 계산의 부호와 같다).
+    if (this.zoomInputGate && !this.zoomInputGate(boundedDelta < 0 ? 'in' : 'out')) return;
 
     const rect = this.container?.getBoundingClientRect();
     const anchor = rect && rect.width > 0 && rect.height > 0

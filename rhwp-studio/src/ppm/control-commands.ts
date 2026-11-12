@@ -28,6 +28,9 @@ export const FONT_SIZE_UP_COMMAND = 'format:font-size-increase';
 export const FONT_SIZE_DOWN_COMMAND = 'format:font-size-decrease';
 /** 상태 표시줄 확대 가로바(임의 배율)가 묶인 명령. */
 export const ZOOM_SLIDER_COMMAND = 'view:zoom-dialog';
+/** Ctrl+휠·핀치로 배율을 바꾸는 입력이 따르는 명령(확대·축소 버튼과 같은 id). */
+export const ZOOM_IN_COMMAND = 'view:zoom-in';
+export const ZOOM_OUT_COMMAND = 'view:zoom-out';
 
 export interface ControlBinding {
   /** 요소를 찾는 CSS selector. 정적 index.html 의 id 나 속성만 쓴다. */

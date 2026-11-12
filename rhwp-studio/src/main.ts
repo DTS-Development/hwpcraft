@@ -118,7 +118,7 @@ import { installEmbedRuntime } from '@/embed/runtime';
 import { PPM_HOST } from '@/ppm/host-mode';
 import { LOCKED_COMMAND_IDS as PPM_HOST_LOCKED_FILE_COMMAND_IDS } from '@/ppm/command-policy';
 import { installPpmHost } from '@/ppm/host-install';
-import { ZOOM_SLIDER_COMMAND as PPM_ZOOM_SLIDER_COMMAND } from '@/ppm/control-commands';
+import { ZOOM_SLIDER_COMMAND as PPM_ZOOM_SLIDER_COMMAND, ZOOM_IN_COMMAND as PPM_ZOOM_IN_COMMAND, ZOOM_OUT_COMMAND as PPM_ZOOM_OUT_COMMAND } from '@/ppm/control-commands';
 import { subscribeFieldChanges } from '@/embed/field-events';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import { enrichFontDecisionTrace } from '@/core/font-decision-trace';
@@ -810,6 +810,8 @@ async function initialize(): Promise<void> {
 
     // InputHandler에 커맨드 디스패처 및 컨텍스트 메뉴 주입
     inputHandler.setDispatcher(dispatcher);
+    // Ctrl+휠 확대·축소도 메뉴의 확대·축소 명령과 같은 정책을 따른다.
+    canvasView?.getViewportManager().setZoomInputGate((direction) => dispatcher.isHostAllowed(direction === 'in' ? PPM_ZOOM_IN_COMMAND : PPM_ZOOM_OUT_COMMAND));
     inputHandler.setContextMenu(new ContextMenu(dispatcher, registry));
     inputHandler.setCommandPalette(new CommandPalette(registry, dispatcher));
     inputHandler.setCellSelectionRenderer(

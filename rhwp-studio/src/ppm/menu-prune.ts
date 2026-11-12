@@ -8,7 +8,7 @@
  */
 
 /** 조작 요소가 모두 막히면 함께 숨길 묶음, 구분선, 묶음을 여는 단추(host-install 이 DOM 에 쓴다). */
-export const CONTAINER_SELECTOR = '.menu-item, .md-sub, .tb-group, .tb-split, .sb-field, .sb-ribbon-group, .sb-command-band, .sb-overflow-host, .sb-dropdown, #icon-toolbar, #style-bar';
+export const CONTAINER_SELECTOR = '.menu-item, .md-sub, .tb-group, .tb-split, .sb-field, .sb-ribbon-group, .sb-command-band, .sb-overflow-host, .sb-dropdown, #menu-bar, #icon-toolbar, #style-bar';
 export const SEPARATOR_SELECTOR = '.md-sep, .tb-sep, .tb-split-sep, .stb-divider, .sb-sep';
 export const TRIGGER_SELECTOR = '#btn-charfx, #btn-style-overflow, .tb-split-arrow';
 /** 정리를 시작하는 뿌리: 메뉴바·도구 상자·서식 막대가 든 머리 영역과 상태 표시줄. */
@@ -53,7 +53,13 @@ export function pruneChrome<N extends PruneNode<N>>(root: N, rules: PruneRules<N
       vis += r.vis;
       kids.push({ el: child, hidden: r.hidden, sep: false });
     }
-    // 구분선: 앞에 보이는 항목이 있고 직전이 구분선이 아닐 때만 남기고, 끝에 남은 구분선은 숨긴다.
+    // 구분선: 이 형제 목록에서 정책 때문에 숨은 항목이 하나도 없으면 원래 배치 그대로 둔다
+    // (회전 묶음 끝의 구분선처럼 원래부터 가장자리에 있는 것도 건드리지 않는다).
+    // 숨은 항목이 있을 때만: 앞에 보이는 항목이 있고 직전이 구분선이 아닐 때 남기고, 끝에 남은 구분선은 숨긴다.
+    if (!kids.some((k) => !k.sep && k.hidden)) {
+      for (const k of kids) if (k.sep) rules.setHidden(k.el, false);
+      return { has, vis, hidden: false };
+    }
     let prev: 'none' | 'item' | 'sep' = 'none';
     let lastSep: N | null = null;
     for (const k of kids) {
@@ -77,10 +83,14 @@ export function pruneChrome<N extends PruneNode<N>>(root: N, rules: PruneRules<N
       return { has: true, vis: 1, hidden: false };
     }
     const t = visitChildren(el);
-    if (!rules.isContainer(el)) return t;
+    if (!rules.isContainer(el)) {
+      // 컨테이너가 아닌 감싸개도 정책 요소가 모두 숨었으면 형제 구분선 판정에서는 비어 있는 것으로 센다(표시는 걸지 않는다).
+      return { has: t.has, vis: t.vis, hidden: t.has && t.vis === 0 };
+    }
     if (rules.isContextHidden?.(el)) {
-      rules.setHidden(el, false); // 숨김은 편집기 몫이다. 우리 표시는 걸어 두지 않는다.
-      return { has: t.has, vis: 0, hidden: true };
+      // 숨김은 편집기 몫이다. 우리 표시는 걸지 않고, 구분선 판정에서는 원래 배치대로 보이는 항목으로 둔다.
+      rules.setHidden(el, false);
+      return { has: t.has, vis: 0, hidden: false };
     }
     const hide = t.has && t.vis === 0;
     rules.setHidden(el, hide);
