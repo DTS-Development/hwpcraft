@@ -81,6 +81,34 @@ export function isEmbedSwallowedFileShortcut(e: EmbedShortcutKeyEventLike): bool
   return key === 'p' || key === 'ㅔ';
 }
 
+/**
+ * PPM 호스트에서 브라우저 찾기 창으로 새면 안 되는 단축키 판정.
+ *
+ * 편집기가 자기 기능으로 쓰는 Ctrl/Cmd+F(찾기)만 대상이다. 툴바·콤보에 포커스가 있거나
+ * 문서 로드 전이면 shortcut-map 경로가 이 키를 삼키지 못하고, 한글 IME 합성 중에는
+ * key 가 'Process' 라 매칭이 빗나가 크롬 찾기 창이 편집기 찾기 창과 함께 열린다.
+ * 그래서 IME 와 무관한 e.code(KeyF)와 한글 자모(ㄹ)도 함께 본다.
+ * Ctrl+G 등 편집기가 쓰지 않는 키와 복사·붙여넣기(C·V·X)는 건드리지 않는다.
+ */
+export function isHostSwallowedFindShortcut(
+  e: EmbedShortcutKeyEventLike & { code?: string },
+): boolean {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return false;
+  const key = e.key.toLowerCase();
+  return key === 'f' || key === 'ㄹ' || e.code === 'KeyF';
+}
+
+/**
+ * 호스트에서 포커스가 편집 textarea 밖(툴바·콤보 등)일 때 편집기 찾기를 열어야 하는 키 판정.
+ * 한글 조합 중(isComposing / key 'Process')에는 열지 않는다 — 찾기 창이 포커스를 가져가면
+ * 조합이 끊기고, 이 키는 차단(isHostSwallowedFindShortcut)만으로 크롬 찾기 유출을 막는다.
+ */
+export function isHostFindOpenShortcut(
+  e: EmbedShortcutKeyEventLike & { code?: string; isComposing?: boolean },
+): boolean {
+  return isHostSwallowedFindShortcut(e) && !e.isComposing && e.key !== 'Process';
+}
+
 export function resolveChromeMode(search = ''): ChromeMode {
   return resolveChromeModeRequest(search).mode;
 }

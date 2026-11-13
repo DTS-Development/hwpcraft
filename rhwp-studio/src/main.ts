@@ -64,6 +64,8 @@ import {
   EMBED_HIDDEN_EDIT_COMMAND_IDS,
   EMBED_HIDDEN_FILE_COMMAND_IDS,
   isEmbedSwallowedFileShortcut,
+  isHostSwallowedFindShortcut,
+  isHostFindOpenShortcut,
   resolveChromeModeRequest,
 } from '@/ui/chrome-mode';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -465,6 +467,15 @@ if (chromeMode === 'embed') {
   // embed에서 미등록이고, InputHandler 활성 시의 중복 preventDefault는 무해하다.
   document.addEventListener('keydown', (e) => {
     if (isEmbedSwallowedFileShortcut(e)) e.preventDefault();
+  }, true);
+}
+
+if (PPM_HOST) {
+  // 호스트 잠금 빌드에서만: Ctrl/Cmd+F 가 크롬 찾기 창으로 새지 않게 한다.
+  // capture + preventDefault 만 쓰고 stopPropagation 은 하지 않아, 편집기(InputHandler)와
+  // 전역 핸들러는 같은 keydown 을 그대로 받아 편집기 찾기 창이 열린다.
+  document.addEventListener('keydown', (e) => {
+    if (isHostSwallowedFindShortcut(e)) e.preventDefault();
   }, true);
 }
 
@@ -1036,6 +1047,13 @@ function setupGlobalShortcuts(): void {
     // 이때 undo/redo만 dispatcher로 보완한다. textarea가 target이면 위에서 이미 return하므로
     // InputHandler와 이중 실행되지 않으며, 다른 단축키의 기존 전역 소유 범위도 넓히지 않는다.
     if (inputHandler?.isActive()) {
+      // 호스트: 툴바·콤보 포커스에서도 Ctrl/Cmd+F 가 편집기 찾기를 연다(크롬 찾기는 위 capture 에서 차단).
+      // 편집 textarea·다이얼로그 입력란은 위에서 이미 return 하므로 이중 실행되지 않는다.
+      if (PPM_HOST && isHostFindOpenShortcut(e) && !document.querySelector('.modal-overlay')) {
+        e.preventDefault();
+        dispatcher.dispatchWithResult('edit:find');
+        return;
+      }
       const commandId = matchShortcut(e, defaultShortcuts);
       if (commandId === 'edit:undo' || commandId === 'edit:redo') {
         const result = dispatcher.dispatchWithResult(commandId);
