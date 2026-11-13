@@ -7,6 +7,7 @@ import {
   EMBED_HIDDEN_EDIT_COMMAND_IDS,
   EMBED_HIDDEN_FILE_COMMAND_IDS,
   isEmbedSwallowedFileShortcut,
+  isHostSwallowedFindShortcut,
   resolveChromeMode,
   resolveChromeModeRequest,
 } from '../src/ui/chrome-mode.ts';
@@ -199,6 +200,39 @@ test('embed 저장·인쇄 단축키 판정은 문서 로드 여부와 무관한
     mainSource,
     /document\.addEventListener\('keydown', \(e\) => \{\n\s*if \(isEmbedSwallowedFileShortcut\(e\)\) e\.preventDefault\(\);\n\s*\}, true\);/,
   );
+});
+
+test('호스트 찾기 단축키 판정은 Ctrl/Cmd+F만 삼키고 복사·붙여넣기는 건드리지 않는다', () => {
+  const ev = (input: Partial<Parameters<typeof isHostSwallowedFindShortcut>[0]>) => ({
+    key: '',
+    ctrlKey: false,
+    metaKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...input,
+  });
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'f', ctrlKey: true })), true);
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'F', metaKey: true })), true);
+  // 한글 자모와 IME 합성 중(key 'Process') — e.code 로 판별한다.
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'ㄹ', ctrlKey: true })), true);
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'Process', code: 'KeyF', ctrlKey: true })), true);
+  // 수식키 없는 F, Alt/Shift 조합은 일반 입력이거나 편집기 단축키가 아니다.
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'f' })), false);
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'f', ctrlKey: true, altKey: true })), false);
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'F', ctrlKey: true, shiftKey: true })), false);
+  // 복사·붙여넣기·잘라내기와 편집기가 쓰지 않는 G 는 그대로 둔다.
+  for (const key of ['c', 'v', 'x', 'g', 'a']) {
+    assert.equal(isHostSwallowedFindShortcut(ev({ key, code: `Key${key.toUpperCase()}`, ctrlKey: true })), false);
+  }
+
+  // main 배선: PPM_HOST 에서만, capture 단계, preventDefault 만(stopPropagation 없음).
+  const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.match(
+    mainSource,
+    /if \(PPM_HOST\) \{\n[^]*?document\.addEventListener\('keydown', \(e\) => \{\n\s*if \(isHostSwallowedFindShortcut\(e\)\) e\.preventDefault\(\);\n\s*\}, true\);/,
+  );
+  const block = mainSource.slice(mainSource.indexOf('isHostSwallowedFindShortcut(e)'), mainSource.indexOf('isHostSwallowedFindShortcut(e)') + 100);
+  assert.doesNotMatch(block, /stopPropagation|stopImmediatePropagation/);
 });
 
 test('embed의 unsaved guard는 로컬 저장 선택지를 막고 자동 discard는 하지 않는다', () => {

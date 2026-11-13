@@ -64,6 +64,7 @@ import {
   EMBED_HIDDEN_EDIT_COMMAND_IDS,
   EMBED_HIDDEN_FILE_COMMAND_IDS,
   isEmbedSwallowedFileShortcut,
+  isHostSwallowedFindShortcut,
   resolveChromeModeRequest,
 } from '@/ui/chrome-mode';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -465,6 +466,15 @@ if (chromeMode === 'embed') {
   // embed에서 미등록이고, InputHandler 활성 시의 중복 preventDefault는 무해하다.
   document.addEventListener('keydown', (e) => {
     if (isEmbedSwallowedFileShortcut(e)) e.preventDefault();
+  }, true);
+}
+
+if (PPM_HOST) {
+  // 호스트 잠금 빌드에서만: Ctrl/Cmd+F 가 크롬 찾기 창으로 새지 않게 한다.
+  // capture + preventDefault 만 쓰고 stopPropagation 은 하지 않아, 편집기(InputHandler)와
+  // 전역 핸들러는 같은 keydown 을 그대로 받아 편집기 찾기 창이 열린다.
+  document.addEventListener('keydown', (e) => {
+    if (isHostSwallowedFindShortcut(e)) e.preventDefault();
   }, true);
 }
 
