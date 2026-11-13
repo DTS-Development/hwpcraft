@@ -65,6 +65,7 @@ import {
   EMBED_HIDDEN_FILE_COMMAND_IDS,
   isEmbedSwallowedFileShortcut,
   isHostSwallowedFindShortcut,
+  isHostFindOpenShortcut,
   resolveChromeModeRequest,
 } from '@/ui/chrome-mode';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -1046,6 +1047,13 @@ function setupGlobalShortcuts(): void {
     // 이때 undo/redo만 dispatcher로 보완한다. textarea가 target이면 위에서 이미 return하므로
     // InputHandler와 이중 실행되지 않으며, 다른 단축키의 기존 전역 소유 범위도 넓히지 않는다.
     if (inputHandler?.isActive()) {
+      // 호스트: 툴바·콤보 포커스에서도 Ctrl/Cmd+F 가 편집기 찾기를 연다(크롬 찾기는 위 capture 에서 차단).
+      // 편집 textarea·다이얼로그 입력란은 위에서 이미 return 하므로 이중 실행되지 않는다.
+      if (PPM_HOST && isHostFindOpenShortcut(e) && !document.querySelector('.modal-overlay')) {
+        e.preventDefault();
+        dispatcher.dispatchWithResult('edit:find');
+        return;
+      }
       const commandId = matchShortcut(e, defaultShortcuts);
       if (commandId === 'edit:undo' || commandId === 'edit:redo') {
         const result = dispatcher.dispatchWithResult(commandId);

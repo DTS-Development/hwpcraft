@@ -8,6 +8,7 @@ import {
   EMBED_HIDDEN_FILE_COMMAND_IDS,
   isEmbedSwallowedFileShortcut,
   isHostSwallowedFindShortcut,
+  isHostFindOpenShortcut,
   resolveChromeMode,
   resolveChromeModeRequest,
 } from '../src/ui/chrome-mode.ts';
@@ -233,6 +234,25 @@ test('호스트 찾기 단축키 판정은 Ctrl/Cmd+F만 삼키고 복사·붙�
   );
   const block = mainSource.slice(mainSource.indexOf('isHostSwallowedFindShortcut(e)'), mainSource.indexOf('isHostSwallowedFindShortcut(e)') + 100);
   assert.doesNotMatch(block, /stopPropagation|stopImmediatePropagation/);
+});
+
+test('호스트 찾기 열기 판정은 한글 조합 중에는 열지 않고 전역 핸들러 배선은 PPM_HOST 에서만이다', () => {
+  const ev = (input: Record<string, unknown>) => ({
+    key: '', ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, ...input,
+  });
+  assert.equal(isHostFindOpenShortcut(ev({ key: 'f', ctrlKey: true })), true);
+  assert.equal(isHostFindOpenShortcut(ev({ key: 'ㄹ', metaKey: true })), true);
+  assert.equal(isHostFindOpenShortcut(ev({ key: 'Process', code: 'KeyF', ctrlKey: true })), false);
+  assert.equal(isHostFindOpenShortcut(ev({ key: 'f', ctrlKey: true, isComposing: true })), false);
+  assert.equal(isHostFindOpenShortcut(ev({ key: 'c', ctrlKey: true })), false);
+  // 조합 중에도 크롬 찾기 차단은 유지된다.
+  assert.equal(isHostSwallowedFindShortcut(ev({ key: 'Process', code: 'KeyF', ctrlKey: true })), true);
+
+  const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.match(
+    mainSource,
+    /if \(PPM_HOST && isHostFindOpenShortcut\(e\) && !document\.querySelector\('\.modal-overlay'\)\) \{\n\s*e\.preventDefault\(\);\n\s*dispatcher\.dispatchWithResult\('edit:find'\);/,
+  );
 });
 
 test('embed의 unsaved guard는 로컬 저장 선택지를 막고 자동 discard는 하지 않는다', () => {

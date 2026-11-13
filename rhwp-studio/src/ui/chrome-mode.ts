@@ -98,6 +98,17 @@ export function isHostSwallowedFindShortcut(
   return key === 'f' || key === 'ㄹ' || e.code === 'KeyF';
 }
 
+/**
+ * 호스트에서 포커스가 편집 textarea 밖(툴바·콤보 등)일 때 편집기 찾기를 열어야 하는 키 판정.
+ * 한글 조합 중(isComposing / key 'Process')에는 열지 않는다 — 찾기 창이 포커스를 가져가면
+ * 조합이 끊기고, 이 키는 차단(isHostSwallowedFindShortcut)만으로 크롬 찾기 유출을 막는다.
+ */
+export function isHostFindOpenShortcut(
+  e: EmbedShortcutKeyEventLike & { code?: string; isComposing?: boolean },
+): boolean {
+  return isHostSwallowedFindShortcut(e) && !e.isComposing && e.key !== 'Process';
+}
+
 export function resolveChromeMode(search = ''): ChromeMode {
   return resolveChromeModeRequest(search).mode;
 }
