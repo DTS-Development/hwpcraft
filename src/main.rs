@@ -180,6 +180,7 @@ fn main() {
         Some("extract-data") => exit_with(cli::queries::data_extraction::extract_data_command(
             &args[2..],
         )),
+        Some("fill-template") => exit_with(cli::commands::fill_template::run(&args[2..])),
         Some("convert") => exit_with(cli::commands::conversion::convert_hwp(&args[2..])),
         Some("extract-pages") => exit_with(cli::commands::conversion::extract_pages(&args[2..])),
         Some("build-from-ingest") => {
