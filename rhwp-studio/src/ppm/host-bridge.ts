@@ -118,10 +118,14 @@ export function createHostBridge(deps: HostBridgeDeps) {
 
   // 마지막으로 연 문서의 이름·형식. 같은 이름·같은 형식 저장은 부모가 일반 저장과 구분할 수 없다.
   let opened: { name: string; format: HwpFormat } | null = null;
+  // 부모가 마지막으로 연 문서가 지금 편집기에 떠 있는지. 열기가 실패하면 편집기는 앞 문서를 되살리므로
+  // 부모가 새 문서 기준으로 센 위치를 앞 문서에서 찾지 않도록, 열기가 끝나 성공할 때까지 goto 를 거절한다.
+  let docMatchesParent = false;
 
   const fail = (error: string) => deps.post({ type: `${PREFIX}:failed`, error });
 
   async function handleOpen(d: Record<string, unknown>): Promise<void> {
+    docMatchesParent = false;
     const name = typeof d.name === 'string' ? d.name : '';
     const bytes = toBytes(d.bytes);
     if (!bytes || bytes.length === 0) return fail(failureText('open', 'invalid-bytes'));
@@ -133,6 +137,7 @@ export function createHostBridge(deps: HostBridgeDeps) {
       await deps.ready();
       await deps.openDocument(name, bytes);
       opened = { name, format: openFormat };
+      docMatchesParent = true;
     } catch (e) {
       console.error('[hwpcraft] 문서 열기 실패', e);
       fail(failureText('open', 'open-failed'));
@@ -201,7 +206,7 @@ export function createHostBridge(deps: HostBridgeDeps) {
     const id = d.id;
     const failed = (reason: string) => deps.post({ type: `${PREFIX}:goto-failed`, id, reason });
     // 열린 문서가 없으면 이동할 곳이 없다.
-    if (!opened) return failed('error');
+    if (!docMatchesParent) return failed('error');
     try {
       await deps.ready();
     } catch {

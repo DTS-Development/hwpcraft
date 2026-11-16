@@ -274,3 +274,39 @@ test('goto: id 가 틀리면 응답하지 않는다', async () => {
   assert.deepEqual(posted, []);
   assert.deepEqual(calls, ['policy:{}', 'open:x.hwpx']);
 });
+
+test('goto: 두 번째 열기가 실패하면 앞 문서가 남아 있어도 goto-failed(error)', async () => {
+  let fail = false;
+  const { bridge, posted } = setup({
+    openDocument: async () => { if (fail) throw new Error('boom'); },
+  });
+  const origError = console.error;
+  console.error = () => {};
+  try {
+    bridge.handle({ type: 'hwpcraft:open', name: 'a.hwpx', bytes: ZIP });
+    bridge.handle({ type: 'hwpcraft:goto', id: 'g-5', location: LOC });
+    await tick();
+    assert.equal(posted.at(-1).type, 'hwpcraft:goto-done');
+    fail = true;
+    bridge.handle({ type: 'hwpcraft:open', name: 'b.hwpx', bytes: ZIP });
+    bridge.handle({ type: 'hwpcraft:goto', id: 'g-6', location: LOC });
+    await tick();
+    assert.deepEqual(posted.slice(-2).map((p) => p.type), ['hwpcraft:failed', 'hwpcraft:goto-failed']);
+    assert.deepEqual(posted.at(-1), { type: 'hwpcraft:goto-failed', id: 'g-6', reason: 'error' });
+    // 형식이 틀려 열기 전에 거절된 경우도 같다.
+    fail = false;
+    bridge.handle({ type: 'hwpcraft:open', name: 'c.hwpx', bytes: ZIP });
+    await tick();
+    bridge.handle({ type: 'hwpcraft:open', name: 'c.pdf', bytes: new TextEncoder().encode('%PDF-1.7----') });
+    bridge.handle({ type: 'hwpcraft:goto', id: 'g-7', location: LOC });
+    await tick();
+    assert.deepEqual(posted.at(-1), { type: 'hwpcraft:goto-failed', id: 'g-7', reason: 'error' });
+    // 다시 성공적으로 열면 이동한다.
+    bridge.handle({ type: 'hwpcraft:open', name: 'd.hwpx', bytes: ZIP });
+    bridge.handle({ type: 'hwpcraft:goto', id: 'g-8', location: LOC });
+    await tick();
+    assert.deepEqual(posted.at(-1), { type: 'hwpcraft:goto-done', id: 'g-8' });
+  } finally {
+    console.error = origError;
+  }
+});
