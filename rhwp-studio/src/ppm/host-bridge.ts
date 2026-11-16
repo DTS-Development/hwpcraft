@@ -3,10 +3,11 @@
  *
  * 순수 로직만 둔다(DOM·wasm 의존 없음). 실제 편집기 동작은 deps 로 주입받아 node 테스트로 검증한다.
  * 메시지 규약은 wordcraft/gridcraft/deckcraft 와 같다:
- *   부모→편집기  open / request-bytes / add-fonts
- *   편집기→부모  ready / save / dirty / failed / bytes / bytes-failed / fonts-added
+ *   부모→편집기  open / request-bytes / add-fonts / goto
+ *   편집기→부모  ready / save / dirty / failed / bytes / bytes-failed / fonts-added / goto-done / goto-failed
  */
 import { sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
+import type { GotoOutcome } from './host-goto.ts';
 
 export const PREFIX = 'hwpcraft';
 
@@ -48,6 +49,8 @@ export interface HostBridgeDeps {
   /** 부모가 바이트를 받은 뒤 깨끗한 상태로 돌린다. */
   markSaved(name: string): Promise<void>;
   addFonts(fonts: FontInput[]): Promise<FontResult>;
+  /** 태그 위치로 이동해 선택한다. location 검사는 이 안에서 한다. */
+  goto(location: unknown): GotoOutcome;
 }
 
 /** 파일 앞머리로 HWP(OLE2)·HWPX(zip)만 통과시킨다. PDF·HML 등은 host 모드에서 거절. */
@@ -192,6 +195,29 @@ export function createHostBridge(deps: HostBridgeDeps) {
     deps.post({ type: `${PREFIX}:fonts-added`, id, installed: result.installed, failed: [...failed, ...result.failed] });
   }
 
+  async function handleGoto(d: Record<string, unknown>): Promise<void> {
+    // id 형식이 틀리면 응답하지 않는다(craft-bridge 규약).
+    if (typeof d.id !== 'string' || !REQUEST_ID.test(d.id)) return;
+    const id = d.id;
+    const failed = (reason: string) => deps.post({ type: `${PREFIX}:goto-failed`, id, reason });
+    // 열린 문서가 없으면 이동할 곳이 없다.
+    if (!opened) return failed('error');
+    try {
+      await deps.ready();
+    } catch {
+      return failed('error');
+    }
+    let outcome: GotoOutcome;
+    try {
+      outcome = deps.goto(d.location);
+    } catch (e) {
+      console.error('[hwpcraft] goto 실패', e);
+      return failed('error');
+    }
+    if (outcome.ok) deps.post({ type: `${PREFIX}:goto-done`, id });
+    else failed(outcome.reason);
+  }
+
   async function saveNow(): Promise<{ ok: true } | { ok: false; reason: string }> {
     let snap: SaveSnapshot;
     try {
@@ -227,6 +253,10 @@ export function createHostBridge(deps: HostBridgeDeps) {
           break;
         case 'add-fonts':
           void enqueue(() => handleAddFonts(d));
+          break;
+        case 'goto':
+          // 앞선 open 이 끝난 뒤에 처리한다.
+          void enqueue(() => handleGoto(d));
           break;
         default:
           break;

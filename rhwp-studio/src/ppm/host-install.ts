@@ -8,6 +8,7 @@ import { isCommandAllowed, sanitizeOverrides, type CommandOverrides } from './co
 import { createHostBridge, type SaveSnapshot, type HwpFormat } from './host-bridge.ts';
 import { CONTROL_BINDINGS } from './control-commands.ts';
 import { CONTAINER_SELECTOR, PRUNE_ROOTS, SEPARATOR_SELECTOR, TRIGGER_SELECTOR, pruneChrome, type PruneRules } from './menu-prune.ts';
+import { gotoLocation, type GotoHit } from './host-goto.ts';
 import { PpmHostFonts } from './host-fonts.ts';
 import { setHostOutput } from './host-output.ts';
 import { isHostConnected, PPM_HOST_MARKER } from './host-mode.ts';
@@ -24,7 +25,12 @@ export interface HostInstallOptions {
     getSourceFormat(): string;
     exportHwpWithReport(): ReportArtifact;
     exportHwpxWithReport(): ReportArtifact;
+    /** 문서 전체 찾기(문서 순서). includeCells=true 면 표 셀·글상자도 훑는다. */
+    searchAllText(query: string, caseSensitive: boolean, includeCells: boolean): GotoHit[];
+    getTableDimensions(sec: number, parentPara: number, controlIdx: number): unknown;
   };
+  /** 찾은 자리를 선택하고 화면을 그 자리로 옮긴다. 입력 처리기가 없으면 false. */
+  selectHit(hit: GotoHit): boolean;
   /** wasm 초기화. 실패하면 failed 를 보낸다. */
   initPromise: Promise<unknown>;
   /** 문서를 연다(저장 확인 없이 교체, 대화상자 억제). */
@@ -139,6 +145,14 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
     },
     markSaved: async (name) => { await opts.markSaved(name); },
     addFonts: async (list) => fonts.add(list),
+    goto: (location) => gotoLocation(location, {
+      findHits: (text) => opts.wasm.searchAllText(text, true, true),
+      // 표가 아닌 컨트롤이면 던진다 — 글상자 일치를 가려내는 데 쓴다.
+      isTable: (sec, parentPara, ctrlIdx) => {
+        try { opts.wasm.getTableDimensions(sec, parentPara, ctrlIdx); return true; } catch { return false; }
+      },
+      select: (hit) => opts.selectHit(hit),
+    }),
   });
 
   // 게이트는 isEnabled(메뉴 상태 조회)에서도 불리므로 판정만 한다. 저장은 파일 > 저장이 실제로 실행될 때만 부모로 넘긴다.

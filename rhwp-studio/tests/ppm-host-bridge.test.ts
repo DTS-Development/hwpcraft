@@ -18,6 +18,7 @@ function setup(over: Partial<HostBridgeDeps> = {}) {
     exportCurrent: () => snap,
     markSaved: async (n) => { calls.push(`saved:${n}`); },
     addFonts: async (f) => ({ installed: f.map((x) => x.family), failed: [] }),
+    goto: (loc) => { calls.push(`goto:${JSON.stringify(loc)}`); return { ok: true }; },
     ...over,
   };
   return { bridge: createHostBridge(deps), posted, calls, snap };
@@ -225,4 +226,51 @@ test('sendOutput: 이름이나 형식이 다르면 깨끗한 상태로 돌리지
   await bridge.sendOutput({ name: '공문.hwp', bytes: new Uint8Array([1]), format: 'hwpx' });
   await bridge.sendOutput({ name: '공문.html', bytes: new Uint8Array([1]), format: 'html' });
   assert.equal(calls.filter((c) => c.startsWith('saved:')).length, 0);
+});
+
+const LOC = { kind: 'hwpx', story: 'body', text: '{{a}}', occurrence: 1, total: 1 };
+
+test('goto: 열린 문서에서 이동하면 goto-done', async () => {
+  const { bridge, posted, calls } = setup();
+  bridge.handle({ type: 'hwpcraft:open', name: 'x.hwpx', bytes: ZIP });
+  bridge.handle({ type: 'hwpcraft:goto', id: 'g-1', location: LOC });
+  await tick();
+  // open 이 끝난 뒤에 처리된다.
+  assert.deepEqual(calls, ['policy:{}', 'open:x.hwpx', `goto:${JSON.stringify(LOC)}`]);
+  assert.deepEqual(posted, [{ type: 'hwpcraft:goto-done', id: 'g-1' }]);
+});
+
+test('goto: 이동 거절 사유를 goto-failed 로 전한다', async () => {
+  const { bridge, posted } = setup({ goto: () => ({ ok: false, reason: 'unsupported' }) });
+  bridge.handle({ type: 'hwpcraft:open', name: 'x.hwpx', bytes: ZIP });
+  bridge.handle({ type: 'hwpcraft:goto', id: 'g-2', location: LOC });
+  await tick();
+  assert.deepEqual(posted, [{ type: 'hwpcraft:goto-failed', id: 'g-2', reason: 'unsupported' }]);
+});
+
+test('goto: 문서를 열기 전이면 goto-failed(error)', async () => {
+  const { bridge, posted, calls } = setup();
+  bridge.handle({ type: 'hwpcraft:goto', id: 'g-3', location: LOC });
+  await tick();
+  assert.deepEqual(posted, [{ type: 'hwpcraft:goto-failed', id: 'g-3', reason: 'error' }]);
+  assert.deepEqual(calls, []);
+});
+
+test('goto: 처리 중 예외는 goto-failed(error), 원문은 보내지 않는다', async () => {
+  const { bridge, posted } = setup({ goto: () => { throw new Error('/secret/path'); } });
+  bridge.handle({ type: 'hwpcraft:open', name: 'x.hwpx', bytes: ZIP });
+  bridge.handle({ type: 'hwpcraft:goto', id: 'g-4', location: LOC });
+  await tick();
+  assert.deepEqual(posted, [{ type: 'hwpcraft:goto-failed', id: 'g-4', reason: 'error' }]);
+});
+
+test('goto: id 가 틀리면 응답하지 않는다', async () => {
+  const { bridge, posted, calls } = setup();
+  bridge.handle({ type: 'hwpcraft:open', name: 'x.hwpx', bytes: ZIP });
+  bridge.handle({ type: 'hwpcraft:goto', id: 'bad id!', location: LOC });
+  bridge.handle({ type: 'hwpcraft:goto', location: LOC });
+  bridge.handle({ type: 'hwpcraft:goto', id: 7, location: LOC });
+  await tick();
+  assert.deepEqual(posted, []);
+  assert.deepEqual(calls, ['policy:{}', 'open:x.hwpx']);
 });
