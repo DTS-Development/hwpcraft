@@ -67,7 +67,7 @@ test('goto: 부모가 센 수와 다르거나 순번이 넘으면 not-found', ()
 });
 
 test('goto: 머리말·꼬리말·각주·미주는 unsupported', () => {
-  for (const story of ['header', 'footer', 'footnote', 'endnote']) {
+  for (const story of ['header', 'footer', 'footnote', 'endnote', 'masterPage']) {
     const { deps, queries } = setup([body(0)]);
     assert.deepEqual(gotoLocation(loc({ story }), deps), { ok: false, reason: 'unsupported' }, story);
     assert.deepEqual(queries, []);

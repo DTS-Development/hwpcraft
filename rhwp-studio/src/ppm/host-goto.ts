@@ -4,7 +4,7 @@
  * 센 방법은 부모의 태그 검사와 같아야 한다: 글자는 문단 자기 글자 기준, 대소문자 구분,
  * 문단 안에서 왼쪽부터 겹치지 않게. 순서는 rhwp `searchAllText` 가 주는 순서(구역 → 문단마다
  * 자기 글자 먼저, 그 다음 그 문단의 표 셀·글상자를 깊이 우선)를 그대로 따른다.
- * 본문·표 셀·글상자 안 본문만 'body' 로 센다. 머리말·꼬리말·각주·미주는 찾기가 훑지 않으므로 unsupported.
+ * 본문·표 셀·글상자 안 본문만 'body' 로 센다. 머리말·꼬리말·각주·미주·바탕쪽은 찾기가 훑지 않으므로 unsupported.
  */
 
 export type GotoFailReason = 'not-found' | 'unsupported' | 'error';
@@ -39,7 +39,7 @@ export interface GotoDeps {
 
 const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 1 && v <= GOTO_MAX_COUNT;
 
-const STORIES = ['body', 'header', 'footer', 'footnote', 'endnote'];
+const STORIES = ['body', 'header', 'footer', 'footnote', 'endnote', 'masterPage'];
 
 /** location 을 검사해 이동한다. 모양이 틀리면 error, 못 다루는 종류·범위는 unsupported. */
 export function gotoLocation(location: unknown, deps: GotoDeps): GotoOutcome {
