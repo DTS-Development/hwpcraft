@@ -3,10 +3,11 @@
  *
  * 순수 로직만 둔다(DOM·wasm 의존 없음). 실제 편집기 동작은 deps 로 주입받아 node 테스트로 검증한다.
  * 메시지 규약은 wordcraft/gridcraft/deckcraft 와 같다:
- *   부모→편집기  open / request-bytes / add-fonts
- *   편집기→부모  ready / save / dirty / failed / bytes / bytes-failed / fonts-added
+ *   부모→편집기  open / request-bytes / add-fonts / goto
+ *   편집기→부모  ready / save / dirty / failed / bytes / bytes-failed / fonts-added / goto-done / goto-failed
  */
 import { sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
+import type { GotoOutcome } from './host-goto.ts';
 
 export const PREFIX = 'hwpcraft';
 
@@ -48,6 +49,8 @@ export interface HostBridgeDeps {
   /** 부모가 바이트를 받은 뒤 깨끗한 상태로 돌린다. */
   markSaved(name: string): Promise<void>;
   addFonts(fonts: FontInput[]): Promise<FontResult>;
+  /** 태그 위치로 이동해 선택한다. location 검사는 이 안에서 한다. */
+  goto(location: unknown): GotoOutcome;
 }
 
 /** 파일 앞머리로 HWP(OLE2)·HWPX(zip)만 통과시킨다. PDF·HML 등은 host 모드에서 거절. */
@@ -115,10 +118,14 @@ export function createHostBridge(deps: HostBridgeDeps) {
 
   // 마지막으로 연 문서의 이름·형식. 같은 이름·같은 형식 저장은 부모가 일반 저장과 구분할 수 없다.
   let opened: { name: string; format: HwpFormat } | null = null;
+  // 부모가 마지막으로 연 문서가 지금 편집기에 떠 있는지. 열기가 실패하면 편집기는 앞 문서를 되살리므로
+  // 부모가 새 문서 기준으로 센 위치를 앞 문서에서 찾지 않도록, 열기가 끝나 성공할 때까지 goto 를 거절한다.
+  let docMatchesParent = false;
 
   const fail = (error: string) => deps.post({ type: `${PREFIX}:failed`, error });
 
   async function handleOpen(d: Record<string, unknown>): Promise<void> {
+    docMatchesParent = false;
     const name = typeof d.name === 'string' ? d.name : '';
     const bytes = toBytes(d.bytes);
     if (!bytes || bytes.length === 0) return fail(failureText('open', 'invalid-bytes'));
@@ -130,6 +137,7 @@ export function createHostBridge(deps: HostBridgeDeps) {
       await deps.ready();
       await deps.openDocument(name, bytes);
       opened = { name, format: openFormat };
+      docMatchesParent = true;
     } catch (e) {
       console.error('[hwpcraft] 문서 열기 실패', e);
       fail(failureText('open', 'open-failed'));
@@ -192,6 +200,29 @@ export function createHostBridge(deps: HostBridgeDeps) {
     deps.post({ type: `${PREFIX}:fonts-added`, id, installed: result.installed, failed: [...failed, ...result.failed] });
   }
 
+  async function handleGoto(d: Record<string, unknown>): Promise<void> {
+    // id 형식이 틀리면 응답하지 않는다(craft-bridge 규약).
+    if (typeof d.id !== 'string' || !REQUEST_ID.test(d.id)) return;
+    const id = d.id;
+    const failed = (reason: string) => deps.post({ type: `${PREFIX}:goto-failed`, id, reason });
+    // 열린 문서가 없으면 이동할 곳이 없다.
+    if (!docMatchesParent) return failed('error');
+    try {
+      await deps.ready();
+    } catch {
+      return failed('error');
+    }
+    let outcome: GotoOutcome;
+    try {
+      outcome = deps.goto(d.location);
+    } catch (e) {
+      console.error('[hwpcraft] goto 실패', e);
+      return failed('error');
+    }
+    if (outcome.ok) deps.post({ type: `${PREFIX}:goto-done`, id });
+    else failed(outcome.reason);
+  }
+
   async function saveNow(): Promise<{ ok: true } | { ok: false; reason: string }> {
     let snap: SaveSnapshot;
     try {
@@ -227,6 +258,10 @@ export function createHostBridge(deps: HostBridgeDeps) {
           break;
         case 'add-fonts':
           void enqueue(() => handleAddFonts(d));
+          break;
+        case 'goto':
+          // 앞선 open 이 끝난 뒤에 처리한다.
+          void enqueue(() => handleGoto(d));
           break;
         default:
           break;

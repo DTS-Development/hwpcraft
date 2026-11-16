@@ -2416,6 +2416,18 @@ if (PPM_HOST) {
       await loadBytes(bytes, name, null, undefined, { suppressDialogs: true, skipRecent: true });
     },
     markSaved: (name) => completeHostSave(name),
+    selectHit: (hit) => {
+      if (!inputHandler) return false;
+      navigateToSearchHit(inputHandler, {
+        found: true,
+        sec: hit.sec,
+        para: hit.para,
+        charOffset: hit.charOffset,
+        length: hit.length,
+        ...(hit.cellContext ? { cellContext: hit.cellContext } : {}),
+      });
+      return true;
+    },
     setFontProvider: (provider) => setHostFontProvider(provider),
     setExternalLinkBlocked,
   });
