@@ -203,10 +203,15 @@ fn fills_header_footer_and_footnote() {
 
 /// 글상자 안 첫 문단(없으면 만든다)에 글자를 넣는다. 반환: 글상자가 있는 본문 문단 번호.
 fn textbox_with(c: &mut DocumentCore, text: &str) -> usize {
+    textbox_in(c, 0, text)
+}
+
+/// `textbox_with`와 같되 본문 `para`번 문단에 만든다(0번 문단은 구역 정의 컨트롤을 가진다).
+fn textbox_in(c: &mut DocumentCore, para: usize, text: &str) -> usize {
     let res = c
         .create_shape_control_native(
             0,
-            0,
+            para,
             0,
             21600,
             7200,
@@ -579,10 +584,10 @@ fn master_page_table_tags_are_filled_and_saved() {
 }
 
 #[test]
-fn master_page_textbox_is_kept_verbatim_or_rejected_closed() {
-    let boxed = || detached_para(|c| textbox_with(c, "상자 {{m}}"));
+fn master_page_textbox_tags_are_filled_and_untagged_box_is_kept_verbatim() {
+    let boxed = || detached_para(|c| textbox_in(c, 1, "상자 {{m}}"));
     // 태그가 없는 글상자는 원본 레코드 그대로 두고 다른 문단만 채운다
-    let plain = detached_para(|c| textbox_with(c, "상자"));
+    let plain = detached_para(|c| textbox_in(c, 1, "상자"));
     let mut c =
         doc_with_master_paragraphs(&["본문"], vec![(false, vec![para("바탕 {{m}}"), plain])]);
     let raw_before = c.document().sections[0]
@@ -614,21 +619,16 @@ fn master_page_textbox_is_kept_verbatim_or_rejected_closed() {
     assert_eq!(second(&raw_before), second(raw_after));
     let re = save_and_reload(&mut c);
     assert_eq!(master_texts(&re)[0][0], "바탕 M");
-    // 모델이 다시 만들면 원본과 달라지는 글상자 안의 태그는 문서를 그대로 둔 채 거절한다
+    // 글상자 안 태그도 채워진다
     let mut c =
         doc_with_master_paragraphs(&["본문"], vec![(false, vec![para("바탕 {{m}}"), boxed()])]);
-    let before = master_texts(&c);
-    match fill(&mut c, json!({"m": "M"})) {
-        Err(TagFillError::Document(m)) => assert!(m.contains("바탕쪽 1"), "{m}"),
-        Ok(_) => {
-            // 다시 만든 결과가 원본과 같은 글상자라면 채워져야 한다
-            let re = save_and_reload(&mut c);
-            assert!(master_texts(&re)[0].contains(&"상자 M".to_string()));
-            return;
-        }
-        Err(other) => panic!("{other:?}"),
-    }
-    assert_eq!(master_texts(&c), before);
+    fill(&mut c, json!({"m": "M"})).unwrap();
+    let re = save_and_reload(&mut c);
+    assert!(
+        master_texts(&re)[0].contains(&"상자 M".to_string()),
+        "{:?}",
+        master_texts(&re)
+    );
 }
 
 #[test]
