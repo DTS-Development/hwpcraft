@@ -361,3 +361,175 @@ fn saved_output_has_no_loss_and_reloads_filled() {
     );
     assert!(t.iter().all(|s| !s.contains("{{")));
 }
+
+// ---------------------------------------------------------------- 바탕쪽
+
+use crate::model::header_footer::MasterPage;
+
+/// 바탕쪽(일반·확장)을 모델로 넣어 저장했다 다시 연 문서. 다시 열면 바탕쪽이 원본 레코드로 들어 있어 저장기가 그 레코드를 쓴다.
+fn doc_with_masters(body: &[&str], masters: &[(bool, &[&str])]) -> DocumentCore {
+    let mut c = doc(body);
+    for (extension, lines) in masters {
+        let page = MasterPage {
+            is_extension: *extension,
+            ext_flags: if *extension { 0x02 } else { 0 },
+            text_width: 1000,
+            text_height: 1000,
+            paragraphs: lines.iter().map(|l| para(l)).collect(),
+            ..Default::default()
+        };
+        // 저장기는 첫 문단의 구역 정의 컨트롤에서 바탕쪽을 쓴다
+        for ctrl in &mut c.document_mut().sections[0].paragraphs[0].controls {
+            if let Control::SectionDef(sd) = ctrl {
+                sd.master_pages.push(page.clone());
+            }
+        }
+        c.document_mut().sections[0]
+            .section_def
+            .master_pages
+            .push(page);
+    }
+    // 원본 스트림이 남아 있으면 저장기가 그대로 써 바탕쪽이 빠진다
+    c.document_mut().sections[0].raw_stream = None;
+    let bytes = c
+        .export_hwp_with_adapter_snapshot_with_report()
+        .unwrap()
+        .into_parts()
+        .0;
+    let re = DocumentCore::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        re.document().sections[0].section_def.master_pages.len(),
+        masters.len()
+    );
+    re
+}
+
+fn master_texts(c: &DocumentCore) -> Vec<Vec<String>> {
+    let mut out = Vec::new();
+    for s in &c.document().sections {
+        for m in &s.section_def.master_pages {
+            let mut t = Vec::new();
+            visit_paras(&m.paragraphs, &mut |p| t.push(p.text.clone()));
+            out.push(t);
+        }
+    }
+    out
+}
+
+/// 채운 문서를 저장(손실 없음)하고 다시 열어 돌려준다.
+fn save_and_reload(c: &mut DocumentCore) -> DocumentCore {
+    let (bytes, loss) = c
+        .export_hwp_with_adapter_snapshot_with_report()
+        .unwrap()
+        .into_parts();
+    assert!(loss.is_empty(), "저장 손실: {}", loss.to_json());
+    DocumentCore::from_bytes(&bytes).unwrap()
+}
+
+#[test]
+fn master_page_values_are_filled_and_saved() {
+    let mut c = doc_with_masters(&["본문 {{b}}"], &[(false, &["바탕 {{m}}", "둘째 {{m}}"])]);
+    assert!(!c.document().sections[0]
+        .section_def
+        .extra_child_records
+        .is_empty());
+    let r = fill(&mut c, json!({"b": "B", "m": "M"})).unwrap();
+    assert_eq!(r.filled, vec!["b", "m"]);
+    let re = save_and_reload(&mut c);
+    assert_eq!(
+        master_texts(&re),
+        vec![vec!["바탕 M".to_string(), "둘째 M".to_string()]]
+    );
+    assert!(texts(&re).contains(&"본문 B".to_string()));
+}
+
+#[test]
+fn master_page_only_template_is_filled() {
+    let mut c = doc_with_masters(&["본문"], &[(false, &["{{m}}"])]);
+    let r = fill(&mut c, json!({"m": "X"})).unwrap();
+    assert!(r.changed);
+    let re = save_and_reload(&mut c);
+    assert_eq!(master_texts(&re), vec![vec!["X".to_string()]]);
+}
+
+#[test]
+fn master_page_loop_changes_paragraph_count_and_saves() {
+    let mut c = doc_with_masters(
+        &["본문"],
+        &[(false, &["{{loop r}}", "항목 {{x}}", "{{endloop}}"])],
+    );
+    fill(&mut c, json!({"r": [{"x": "a"}, {"x": "b"}, {"x": "c"}]})).unwrap();
+    let re = save_and_reload(&mut c);
+    assert_eq!(
+        master_texts(&re),
+        vec![vec![
+            "항목 a".to_string(),
+            "항목 b".to_string(),
+            "항목 c".to_string()
+        ]]
+    );
+    // 빈 배열이면 문단이 비어도 바탕쪽은 남는다
+    let mut c = doc_with_masters(
+        &["본문"],
+        &[(false, &["{{loop r}}", "항목 {{x}}", "{{endloop}}"])],
+    );
+    fill(&mut c, json!({"r": []})).unwrap();
+    let re = save_and_reload(&mut c);
+    assert_eq!(master_texts(&re).len(), 1);
+}
+
+#[test]
+fn extension_master_page_in_section_tail_is_filled_and_saved() {
+    let mut c = doc_with_masters(
+        &["본문 {{b}}"],
+        &[(false, &["기본 {{m}}"]), (true, &["확장 {{m}} {{e}}"])],
+    );
+    assert!(c.document().sections[0].trailing_lists.is_some());
+    fill(&mut c, json!({"b": "B", "m": "M", "e": "E"})).unwrap();
+    let re = save_and_reload(&mut c);
+    assert_eq!(
+        master_texts(&re),
+        vec![vec!["기본 M".to_string()], vec!["확장 M E".to_string()]]
+    );
+}
+
+#[test]
+fn master_page_scan_locates_keys_after_body_in_master_story() {
+    let c = doc_with_masters(
+        &["본문 {{b}} {{m}}"],
+        &[(false, &["바탕 {{m}}"]), (false, &["또 {{m}} {{only}}"])],
+    );
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert!(scan.issues.is_empty());
+    let loc = |k: &str| {
+        scan.locations
+            .iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, l)| l.clone())
+            .unwrap()
+    };
+    // 처음 쓰인 곳은 본문
+    assert_eq!(loc("m").story.as_str(), "body");
+    let only = loc("only");
+    assert_eq!(only.story.as_str(), "masterPage");
+    assert_eq!(
+        (only.text.as_str(), only.occurrence, only.total),
+        ("{{only}}", 1, 1)
+    );
+}
+
+#[test]
+fn master_page_syntax_error_rejects_without_touching_document() {
+    let mut c = doc_with_masters(&["본문 {{b}}"], &[(false, &["{{loop r}}", "x"])]);
+    let before = master_texts(&c);
+    let err = fill(&mut c, json!({"b": "B"})).unwrap_err();
+    match err {
+        TagFillError::Syntax(issues) => assert_eq!(
+            issues[0].location.as_ref().unwrap().story.as_str(),
+            "masterPage"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(master_texts(&c), before);
+    assert!(texts(&c).contains(&"본문 {{b}}".to_string()));
+}

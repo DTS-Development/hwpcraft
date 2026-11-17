@@ -7,6 +7,7 @@
 //!
 //! 먼저 빈 데이터로 한 번 훑어(collect) 문법 오류를 모두 낸 뒤, 데이터를 채운다. 두 번 다 복제본에서 하므로
 //! 실패하면 문서는 그대로다.
+use super::tag_master::write_back_masters;
 pub use super::tag_scan::IssueKind;
 use super::tag_scan::{edit_range, is_obj, model, scan, strip_fill, Tag, TagKind, FILL};
 use crate::{
@@ -213,6 +214,21 @@ pub(super) struct Pass {
     pub first_units: Vec<Option<usize>>,
     /// 구역마다 바뀌었는가.
     pub changed_secs: Vec<bool>,
+}
+
+/// 바탕쪽 하나의 복제본과 채운 뒤 바뀌었는가.
+struct MasterRun {
+    section: usize,
+    index: usize,
+    paras: Vec<Paragraph>,
+    changed: bool,
+}
+
+/// 한 번의 훑기 전체: 결과, 구역 본문 복제본, 바탕쪽 복제본.
+struct Run {
+    pass: Pass,
+    secs: Vec<Vec<Paragraph>>,
+    masters: Vec<MasterRun>,
 }
 
 pub(super) struct Engine {
@@ -1455,35 +1471,10 @@ pub struct TagFillReport {
     pub changed: bool,
 }
 
-fn master_page_issues(doc: &DocumentCore) -> Vec<TagIssue> {
-    let mut out = Vec::new();
-    for s in &doc.document.sections {
-        for m in &s.section_def.master_pages {
-            visit_paras(&m.paragraphs, &mut |p| {
-                if p.text.contains("{{") || p.text.contains("}}") {
-                    out.push(TagIssue {
-                        message: "바탕쪽의 태그는 지원하지 않습니다: 본문·머리말·꼬리말로 옮기세요"
-                            .into(),
-                        kind: IssueKind::Other,
-                        name: None,
-                        location: None,
-                    });
-                }
-            });
-        }
-    }
-    out.truncate(MAX_LOCATED_ISSUES);
-    out
-}
-
 impl DocumentCore {
-    /// 구역 본문을 복제해 엔진을 돌린다. 문서는 바꾸지 않는다.
-    fn run_tags(
-        &self,
-        data: &Value,
-        collect: bool,
-        limits: TagLimits,
-    ) -> Res<(Pass, Vec<Vec<Paragraph>>)> {
+    /// 구역 본문과 바탕쪽을 복제해 엔진을 돌린다. 문서는 바꾸지 않는다.
+    /// HWPX와 같이 본문(구역 순서)을 모두 훑은 뒤 바탕쪽(구역 순서, 구역 안 순서)을 훑는다.
+    fn run_tags(&self, data: &Value, collect: bool, limits: TagLimits) -> Res<Run> {
         let allocator = if collect {
             None
         } else {
@@ -1499,9 +1490,23 @@ impl DocumentCore {
             .iter()
             .map(|s| s.paragraphs.clone())
             .collect();
+        let mut masters: Vec<MasterRun> = Vec::new();
+        for (section, s) in self.document.sections.iter().enumerate() {
+            for (index, m) in s.section_def.master_pages.iter().enumerate() {
+                masters.push(MasterRun {
+                    section,
+                    index,
+                    paras: m.paragraphs.clone(),
+                    changed: false,
+                });
+            }
+        }
         if collect {
             for paras in &mut secs {
                 engine.register(paras, Story::Body, true);
+            }
+            for m in &mut masters {
+                engine.register(&mut m.paras, Story::MasterPage, true);
             }
         }
         let mut firsts = Vec::with_capacity(secs.len());
@@ -1513,14 +1518,24 @@ impl DocumentCore {
             changed_secs.push(engine.changed);
             engine.changed |= before;
         }
-        Ok((engine.finish(firsts, changed_secs), secs))
+        for m in &mut masters {
+            let before = engine.changed;
+            engine.changed = false;
+            engine.run_section(&mut m.paras, data)?;
+            m.changed = engine.changed;
+            engine.changed |= before;
+        }
+        Ok(Run {
+            pass: engine.finish(firsts, changed_secs),
+            secs,
+            masters,
+        })
     }
 
     /// 템플릿 키·위치·문법 오류를 모은다. 문서는 바뀌지 않는다.
     pub fn scan_template_tags(&self, limits: TagLimits) -> Res<TagScan> {
-        let (pass, _) = self.run_tags(&Value::Null, true, limits)?;
-        let mut issues = pass.issues;
-        issues.extend(master_page_issues(self));
+        let pass = self.run_tags(&Value::Null, true, limits)?.pass;
+        let issues = pass.issues;
         let mut locations: Vec<(String, TagLocation)> = Vec::new();
         for path in pass.keys.paths() {
             if let Some(loc) = pass.sites.get(&path) {
@@ -1537,13 +1552,15 @@ impl DocumentCore {
     /// 데이터로 `{{...}}`를 채운다. 문법 오류·한도 초과면 문서는 그대로 두고 Err.
     /// 쪽 나누기는 하지 않는다. 같은 인스턴스에서 쪽 정보를 읽을 호출자는 `repaginate_if_needed()`를 부른다.
     pub fn fill_template_tags(&mut self, data: &Value, limits: TagLimits) -> Res<TagFillReport> {
-        let (check, _) = self.run_tags(&Value::Null, true, limits)?;
-        let mut issues = check.issues;
-        issues.extend(master_page_issues(self));
+        let issues = self.run_tags(&Value::Null, true, limits)?.pass.issues;
         if !issues.is_empty() {
             return Err(TagFillError::Syntax(issues));
         }
-        let (pass, secs) = self.run_tags(data, false, limits)?;
+        let Run {
+            pass,
+            secs,
+            masters,
+        } = self.run_tags(data, false, limits)?;
         if !pass.changed {
             return Ok(TagFillReport {
                 filled: Vec::new(),
@@ -1551,15 +1568,45 @@ impl DocumentCore {
                 changed: false,
             });
         }
+        // 바탕쪽은 HWP 파일에 원본 레코드로도 들어 있어, 모델만 고치면 저장에 반영되지 않는다.
+        // 문서를 바꾸기 전에 복제본에서 먼저 되써 보아 구조가 안 맞으면 문서를 그대로 둔 채 거절한다.
+        let mut edits: Vec<HashMap<usize, Vec<Paragraph>>> =
+            vec![HashMap::new(); self.document.sections.len()];
+        for m in masters.into_iter().filter(|m| m.changed) {
+            edits[m.section].insert(m.index, m.paras);
+        }
+        for (si, e) in edits.iter().enumerate().filter(|(_, e)| !e.is_empty()) {
+            let sec = &self.document.sections[si];
+            let mut sd = sec.section_def.clone();
+            let mut tail = sec.trailing_lists.clone();
+            write_back_masters(&mut sd, tail.as_mut(), e).map_err(TagFillError::Document)?;
+            for p in &sec.paragraphs {
+                for c in &p.controls {
+                    if let Control::SectionDef(sd) = c {
+                        write_back_masters(&mut (**sd).clone(), None, e)
+                            .map_err(TagFillError::Document)?;
+                    }
+                }
+            }
+        }
         // 여기부터는 실패하지 않는다: 구역마다 본문을 바꿔 끼우고 줄 배치를 다시 짠다.
+        let tail_sealed = crate::model::section_tail::validate_preservation(&self.document).is_ok();
         let mut touched = Vec::new();
         for (si, (paras, first)) in secs.into_iter().zip(&pass.first_units).enumerate() {
-            if !pass.changed_secs[si] && first.is_none() {
+            if !pass.changed_secs[si] && first.is_none() && edits[si].is_empty() {
                 continue;
             }
-            self.document.sections[si].paragraphs = paras;
+            if pass.changed_secs[si] || first.is_some() {
+                self.document.sections[si].paragraphs = paras;
+            }
             self.document.sections[si].raw_stream = None;
+            if !edits[si].is_empty() {
+                self.commit_masters(si, &edits[si]);
+            }
             touched.push((si, *first));
+        }
+        if tail_sealed {
+            self.document.seal_section_tail_provenance();
         }
         for (si, first) in touched {
             self.recompose_section(si);
@@ -1592,5 +1639,19 @@ impl DocumentCore {
             empty: pass.empty.into_iter().collect(),
             changed: true,
         })
+    }
+
+    /// 바뀐 바탕쪽을 구역 모델·구역 정의 컨트롤·구역 끝 목록에 되쓴다(먼저 복제본에서 확인한 뒤에만 부른다).
+    fn commit_masters(&mut self, si: usize, edits: &HashMap<usize, Vec<Paragraph>>) {
+        let sec = &mut self.document.sections[si];
+        let _ = write_back_masters(&mut sec.section_def, sec.trailing_lists.as_mut(), edits);
+        // 본문 첫 문단의 구역 정의 컨트롤이 저장 때 쓰이는 원본 레코드를 따로 가진다
+        for p in &mut sec.paragraphs {
+            for c in &mut p.controls {
+                if let Control::SectionDef(sd) = c {
+                    let _ = write_back_masters(sd, None, edits);
+                }
+            }
+        }
     }
 }

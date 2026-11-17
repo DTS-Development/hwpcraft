@@ -8,6 +8,7 @@ mod rows_geometry;
 mod tag_fill;
 #[cfg(test)]
 mod tag_fill_tests;
+mod tag_master;
 mod tag_scan;
 mod template;
 mod template_edit;
