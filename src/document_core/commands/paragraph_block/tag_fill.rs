@@ -929,6 +929,10 @@ impl Engine {
         }
         let first = ranges.first().map(|r| r.0.unit);
         let proto = first.map(|_| tpl[0].clone());
+        if self.collect && !ranges.is_empty() {
+            self.render_paras_collect(tpl, &ranges, sc)?;
+            return Ok(first.zip(proto));
+        }
         let mut out: Vec<Paragraph> = Vec::with_capacity(tpl.len());
         let mut next = 0usize;
         for (open, close) in &ranges {
@@ -969,7 +973,7 @@ impl Engine {
 
     fn expand_paras<'d>(
         &mut self,
-        tpl: &mut [Paragraph],
+        tpl: &[Paragraph],
         open: &Ev,
         close: &Ev,
         sc: &Sc<'d>,
@@ -1000,12 +1004,7 @@ impl Engine {
         )?;
         for item in &items {
             self.spend(&tpl[range.clone()])?;
-            // 키·위치만 모으는 단계(항목 1개)는 원본을 옮겨 쓴다. 복제하면 겹 수 x 몸통 크기만큼 메모리가 쌓이는데 예산에도 안 잡힌다.
-            let mut clones: Vec<Paragraph> = if self.collect {
-                tpl[range.clone()].iter_mut().map(std::mem::take).collect()
-            } else {
-                tpl[range.clone()].to_vec()
-            };
+            let mut clones: Vec<Paragraph> = tpl[range.clone()].to_vec();
             let last = clones.len() - 1;
             blank(&mut clones[0], &open.tag);
             blank(&mut clones[last], &close.tag);
@@ -1028,6 +1027,76 @@ impl Engine {
         if !items.is_empty() || !self.collect {
             self.changed = true;
         }
+        Ok(())
+    }
+
+    /// 키·위치만 모으는 단계의 문단 묶음 처리. 결과 문단은 쓰지 않으므로 복제도 보관도 하지 않고 원본을 넘겨 가며 처리한다.
+    /// 겹마다 문단 목록 전체를 들고 있으면 32겹 x 넓은 몸통만큼 메모리가 쌓이므로, 반복 범위를 떼어 낸 뒤 나머지 목록은 곧 버린다.
+    fn render_paras_collect<'d>(
+        &mut self,
+        tpl: &mut Vec<Paragraph>,
+        ranges: &[(Ev, Ev)],
+        sc: &Sc<'d>,
+    ) -> Res<()> {
+        let mut rest = std::mem::take(tpl);
+        let mut base = 0usize;
+        for (open, close) in ranges {
+            let tail = rest.split_off(close.unit + 1 - base);
+            let body = rest.split_off(open.unit - base);
+            for mut p in rest {
+                self.render_paragraph(&mut p, sc)?;
+            }
+            self.expand_collect(body, open, close, sc)?;
+            rest = tail;
+            base = close.unit + 1;
+        }
+        for mut p in rest {
+            self.render_paragraph(&mut p, sc)?;
+        }
+        Ok(())
+    }
+
+    /// `expand_paras`의 키 수집판: 항목 하나(빈 값)로 몸통 원본을 그대로 처리한다.
+    fn expand_collect<'d>(
+        &mut self,
+        body: Vec<Paragraph>,
+        open: &Ev,
+        close: &Ev,
+        sc: &Sc<'d>,
+    ) -> Res<()> {
+        let site = self.site_of(&body[0], open.tag.start, &open.tag.text);
+        self.record(key_path(&sc.stack, &open.name), site);
+        if has_section_def(&body) {
+            let site = self.site_of(&body[0], open.tag.start, &open.tag.text);
+            self.report(
+                format!(
+                    "구역 설정이 든 문단은 반복에 넣을 수 없습니다: {{{{loop {}}}}}를 문서 첫 문단 뒤로 옮기세요",
+                    open.name
+                ),
+                IssueKind::Other,
+                Some(open.name.clone()),
+                Some(site),
+            );
+            return Ok(());
+        }
+        let item = empty_scope();
+        let mut clones = body;
+        let last = clones.len() - 1;
+        blank(&mut clones[0], &open.tag);
+        blank(&mut clones[last], &close.tag);
+        let mut kept: Vec<Paragraph> = clones
+            .into_iter()
+            .enumerate()
+            .filter(|(i, c)| !((*i == 0 || *i == last) && is_pure_text(c) && tag_only(c)))
+            .map(|(_, c)| c)
+            .collect();
+        let mut scopes = sc.scopes.clone();
+        scopes.push(item);
+        let mut stack = sc.stack.clone();
+        stack.push(open.name.clone());
+        let sc2 = Sc { scopes, stack };
+        self.render_paras(&mut kept, &sc2)?;
+        self.changed = true;
         Ok(())
     }
 
