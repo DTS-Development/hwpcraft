@@ -40,10 +40,11 @@ mod commands;
 pub use commands::paragraph_block::{
     FillTemplateRequest, FillTemplateResult, ImportParagraphBlockLimits,
     ImportParagraphBlockPreview, ImportParagraphBlockRequest, ImportParagraphBlockResult,
-    ImportResourceCounts, ParagraphBlockBudget, ParagraphBlockCopy, ParagraphBlockLimits,
-    ParagraphBlockMapping, ParagraphBlockPathStep, ParagraphBlockValidationError,
-    RepeatParagraphBlockRequest, RepeatParagraphBlockResult, RepeatTableRowsRequest,
-    RepeatTableRowsResult, TemplateBinding, TemplateFillPreview, TemplateFillRequest,
+    ImportResourceCounts, IssueKind, ParagraphBlockBudget, ParagraphBlockCopy,
+    ParagraphBlockLimits, ParagraphBlockMapping, ParagraphBlockPathStep,
+    ParagraphBlockValidationError, RepeatParagraphBlockRequest, RepeatParagraphBlockResult,
+    RepeatTableRowsRequest, RepeatTableRowsResult, JVal, TagFillError, TagFillReport, TagIssue, TagKeys,
+    TagLimits, TagLocation, TagScan, TemplateBinding, TemplateFillPreview, TemplateFillRequest,
     TemplateFillTarget, TemplateOperation, TemplateOperationResult, TemplateScope,
     TEMPLATE_REQUEST_MAX_BYTES,
 };

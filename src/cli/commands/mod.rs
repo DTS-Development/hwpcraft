@@ -7,6 +7,7 @@ pub(crate) mod batch_fill;
 pub(crate) mod caption_validation;
 pub(crate) mod conversion;
 pub(crate) mod edit;
+pub(crate) mod fill_template;
 pub(crate) mod generation;
 pub(crate) mod internal_validation;
 pub(crate) mod pdf_import;

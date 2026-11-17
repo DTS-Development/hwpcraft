@@ -5,6 +5,12 @@ mod import_json;
 mod owned;
 mod repeat;
 mod rows_geometry;
+mod tag_fill;
+mod tag_json;
+#[cfg(test)]
+mod tag_fill_tests;
+mod tag_master;
+mod tag_scan;
 mod template;
 mod template_edit;
 mod template_form;
@@ -17,6 +23,11 @@ pub use import::{
     ImportParagraphBlockResult, ImportResourceCounts,
 };
 pub use repeat::{ParagraphBlockCopy, ParagraphBlockMapping, RepeatParagraphBlockResult};
+pub use tag_json::JVal;
+pub use tag_fill::{
+    IssueKind, Story, TagFillError, TagFillReport, TagIssue, TagKeys, TagLimits, TagLocation,
+    TagScan,
+};
 pub use template::{TemplateBinding, TemplateFillPreview, TemplateFillRequest, TemplateFillTarget};
 pub use template_form::{FillTemplateRequest, FillTemplateResult, TemplateScope};
 pub use template_operation::{

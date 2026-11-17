@@ -627,6 +627,15 @@ pub(crate) const COMMANDS: &[CommandSpec] = &[
         false,
     ),
     spec(
+        "fill-template",
+        Category::Export,
+        Visibility::DispatchOnly("HWP {{변수}} 템플릿 채우기·키 추출(dts-craft 전용)"),
+        None,
+        false,
+        false,
+        false,
+    ),
+    spec(
         "convert",
         Category::Export,
         Visibility::Public,
