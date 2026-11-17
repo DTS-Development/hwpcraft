@@ -368,14 +368,24 @@ use crate::model::header_footer::MasterPage;
 
 /// 바탕쪽(일반·확장)을 모델로 넣어 저장했다 다시 연 문서. 다시 열면 바탕쪽이 원본 레코드로 들어 있어 저장기가 그 레코드를 쓴다.
 fn doc_with_masters(body: &[&str], masters: &[(bool, &[&str])]) -> DocumentCore {
+    let masters: Vec<(bool, Vec<Paragraph>)> = masters
+        .iter()
+        .map(|(e, lines)| (*e, lines.iter().map(|l| para(l)).collect()))
+        .collect();
+    doc_with_master_paragraphs(body, masters)
+}
+
+fn doc_with_master_paragraphs(body: &[&str], masters: Vec<(bool, Vec<Paragraph>)>) -> DocumentCore {
     let mut c = doc(body);
-    for (extension, lines) in masters {
+    let count = masters.len();
+    for (extension, paragraphs) in masters {
+        let extension = &extension;
         let page = MasterPage {
             is_extension: *extension,
             ext_flags: if *extension { 0x02 } else { 0 },
             text_width: 1000,
             text_height: 1000,
-            paragraphs: lines.iter().map(|l| para(l)).collect(),
+            paragraphs,
             ..Default::default()
         };
         // 저장기는 첫 문단의 구역 정의 컨트롤에서 바탕쪽을 쓴다
@@ -399,7 +409,7 @@ fn doc_with_masters(body: &[&str], masters: &[(bool, &[&str])]) -> DocumentCore 
     let re = DocumentCore::from_bytes(&bytes).unwrap();
     assert_eq!(
         re.document().sections[0].section_def.master_pages.len(),
-        masters.len()
+        count
     );
     re
 }
@@ -532,4 +542,215 @@ fn master_page_syntax_error_rejects_without_touching_document() {
     }
     assert_eq!(master_texts(&c), before);
     assert!(texts(&c).contains(&"본문 {{b}}".to_string()));
+}
+
+/// 다른 문서에서 만든 표·글상자 문단을 떼어 바탕쪽 문단으로 쓴다.
+fn detached_para(build: impl FnOnce(&mut DocumentCore) -> usize) -> Paragraph {
+    let mut c = doc(&["x"]);
+    let at = build(&mut c);
+    c.document_mut().sections[0].paragraphs.remove(at)
+}
+
+#[test]
+fn master_page_table_tags_are_filled_and_saved() {
+    let tbl = detached_para(|c| {
+        table(
+            c,
+            &[
+                &["품목", "{{loop items}}{{n}}"],
+                &["합계", "{{total}}{{endloop}}"],
+            ],
+        )
+    });
+    let mut c = doc_with_master_paragraphs(&["본문"], vec![(false, vec![para("바탕 {{m}}"), tbl])]);
+    let r = fill(
+        &mut c,
+        json!({"m": "M", "total": "T", "items": [{"n": "a"}, {"n": "b"}]}),
+    )
+    .unwrap();
+    assert!(r.changed);
+    let re = save_and_reload(&mut c);
+    let t = &master_texts(&re)[0];
+    assert!(t.contains(&"바탕 M".to_string()), "{t:?}");
+    for want in ["a", "b", "T"] {
+        assert!(t.iter().any(|s| s == want), "{want} not in {t:?}");
+    }
+    assert!(t.iter().all(|s| !s.contains("{{")), "{t:?}");
+}
+
+#[test]
+fn master_page_textbox_is_kept_verbatim_or_rejected_closed() {
+    let boxed = || detached_para(|c| textbox_with(c, "상자 {{m}}"));
+    // 태그가 없는 글상자는 원본 레코드 그대로 두고 다른 문단만 채운다
+    let plain = detached_para(|c| textbox_with(c, "상자"));
+    let mut c =
+        doc_with_master_paragraphs(&["본문"], vec![(false, vec![para("바탕 {{m}}"), plain])]);
+    let raw_before = c.document().sections[0]
+        .section_def
+        .extra_child_records
+        .clone();
+    fill(&mut c, json!({"m": "M"})).unwrap();
+    let raw_after = &c.document().sections[0].section_def.extra_child_records;
+    // 글상자 문단(둘째)의 레코드는 바이트까지 같다
+    let second = |r: &[crate::model::document::RawRecord]| {
+        let top = r
+            .iter()
+            .filter(|x| x.tag_id == crate::parser::tags::HWPTAG_PARA_HEADER)
+            .map(|x| x.level)
+            .min()
+            .unwrap();
+        let at = r
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.tag_id == crate::parser::tags::HWPTAG_PARA_HEADER && x.level == top)
+            .nth(1)
+            .unwrap()
+            .0;
+        r[at..]
+            .iter()
+            .map(|x| (x.tag_id, x.level, x.data.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(second(&raw_before), second(raw_after));
+    let re = save_and_reload(&mut c);
+    assert_eq!(master_texts(&re)[0][0], "바탕 M");
+    // 모델이 다시 만들면 원본과 달라지는 글상자 안의 태그는 문서를 그대로 둔 채 거절한다
+    let mut c =
+        doc_with_master_paragraphs(&["본문"], vec![(false, vec![para("바탕 {{m}}"), boxed()])]);
+    let before = master_texts(&c);
+    match fill(&mut c, json!({"m": "M"})) {
+        Err(TagFillError::Document(m)) => assert!(m.contains("바탕쪽 1"), "{m}"),
+        Ok(_) => {
+            // 다시 만든 결과가 원본과 같은 글상자라면 채워져야 한다
+            let re = save_and_reload(&mut c);
+            assert!(master_texts(&re)[0].contains(&"상자 M".to_string()));
+            return;
+        }
+        Err(other) => panic!("{other:?}"),
+    }
+    assert_eq!(master_texts(&c), before);
+}
+
+#[test]
+fn master_page_fill_keeps_memos_in_section_tail() {
+    use crate::{model::document::RawRecord, parser::tags};
+    let mut c = doc_with_masters(
+        &["본문"],
+        &[(false, &["기본 {{m}}"]), (true, &["확장 {{m}}"])],
+    );
+    // 구역 끝 목록 앞뒤에 메모 묶음(MEMO_LIST + LIST_HEADER + 문단)을 끼운다
+    let memo = |text: &str| -> Vec<RawRecord> {
+        let mut made = Vec::new();
+        crate::serializer::body_text::serialize_paragraph_list(&[para(text)], 2, &mut made);
+        let mut v = vec![
+            RawRecord {
+                tag_id: tags::HWPTAG_MEMO_LIST,
+                level: 1,
+                data: vec![0; 4],
+            },
+            RawRecord {
+                tag_id: tags::HWPTAG_LIST_HEADER,
+                level: 1,
+                data: vec![1, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ];
+        v.extend(made.into_iter().map(|r| RawRecord {
+            tag_id: r.tag_id,
+            level: r.level,
+            data: r.data,
+        }));
+        v
+    };
+    let (first, last) = (memo("메모 앞 {{m}}"), memo("메모 뒤 {{m}}"));
+    {
+        let t = c.document_mut().sections[0]
+            .trailing_lists
+            .as_mut()
+            .unwrap();
+        let mut all = first.clone();
+        all.append(&mut t.records);
+        all.extend(last.clone());
+        t.records = all;
+    }
+    c.document_mut().seal_section_tail_provenance();
+    fill(&mut c, json!({"m": "M"})).unwrap();
+    let t = c.document().sections[0].trailing_lists.as_ref().unwrap();
+    let same = |a: &[RawRecord], b: &[RawRecord]| {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| x.tag_id == y.tag_id && x.level == y.level && x.data == y.data)
+    };
+    assert!(same(&t.records[..first.len()], &first), "앞 메모가 바뀜");
+    assert!(
+        same(&t.records[t.records.len() - last.len()..], &last),
+        "뒤 메모가 바뀜"
+    );
+    let re = save_and_reload(&mut c);
+    assert_eq!(
+        master_texts(&re),
+        vec![vec!["기본 M".to_string()], vec!["확장 M".to_string()]]
+    );
+}
+
+#[test]
+fn master_page_with_unmodeled_records_is_rejected_closed_but_other_pages_still_fill() {
+    use crate::{model::document::RawRecord, parser::tags};
+    let mut c = doc_with_masters(
+        &["본문 {{b}}"],
+        &[(false, &["첫째 {{m}}"]), (false, &["둘째 {{m}}"])],
+    );
+    // 첫째 바탕쪽 끝에 모델이 담지 못하는 레코드가 있다고 하자
+    let sd_records = |c: &DocumentCore| {
+        c.document().sections[0]
+            .section_def
+            .extra_child_records
+            .len()
+    };
+    let (start, _) = {
+        let r = &c.document().sections[0].section_def.extra_child_records;
+        let heads: Vec<usize> = r
+            .iter()
+            .enumerate()
+            .filter(|(_, x)| x.tag_id == tags::HWPTAG_LIST_HEADER && x.level == r[0].level)
+            .map(|(i, _)| i)
+            .collect();
+        (heads[1], heads.len())
+    };
+    let junk = RawRecord {
+        tag_id: tags::HWPTAG_BEGIN + 200,
+        level: c.document().sections[0].section_def.extra_child_records[start].level + 1,
+        data: vec![1, 2, 3],
+    };
+    c.document_mut().sections[0]
+        .section_def
+        .extra_child_records
+        .insert(start, junk.clone());
+    // 같은 레코드를 첫 문단의 구역 정의 컨트롤 사본에도 둔다
+    for ctrl in &mut c.document_mut().sections[0].paragraphs[0].controls {
+        if let Control::SectionDef(sd) = ctrl {
+            sd.extra_child_records.insert(start, junk.clone());
+        }
+    }
+    let n = sd_records(&c);
+    let before = master_texts(&c);
+    let err = fill(&mut c, json!({"b": "B", "m": "M"})).unwrap_err();
+    match err {
+        TagFillError::Document(m) => assert!(m.contains("바탕쪽 1"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(master_texts(&c), before);
+    assert_eq!(sd_records(&c), n);
+    assert!(texts(&c).contains(&"본문 {{b}}".to_string()));
+    // 태그가 없는 바탕쪽(바뀌지 않음)이면 같은 문서도 그대로 채워진다
+    let mut ok = doc_with_masters(&["본문 {{b}}"], &[(false, &["첫째"])]);
+    ok.document_mut().sections[0]
+        .section_def
+        .extra_child_records
+        .push(RawRecord {
+            tag_id: tags::HWPTAG_BEGIN + 200,
+            level: 9,
+            data: vec![1],
+        });
+    fill(&mut ok, json!({"b": "B"})).unwrap();
 }
