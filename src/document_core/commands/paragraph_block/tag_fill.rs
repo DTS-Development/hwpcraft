@@ -111,6 +111,8 @@ pub(super) const MAX_LOOP_DEPTH: usize = 32;
 
 /// 한 문단 안의 태그 수 상한. 태그마다 문단 글자를 고쳐 쓰므로 비용이 (태그 수 × 문단 길이)로 늘어난다.
 pub(super) const MAX_TAGS_PER_PARAGRAPH: usize = 5000;
+/// 문서 전체의 채우기 작업량 상한(문단마다 태그 수 x 문단 글자 수의 합). 태그마다 문단 글자를 고쳐 쓰므로 문단당 상한만으로는 전체 시간이 묶이지 않는다.
+pub(super) const MAX_EDIT_WORK: u64 = 2_000_000_000;
 
 fn too_deep(name: &str) -> String {
     format!("반복을 너무 깊게 겹칠 수 없습니다: {{{{loop {name}}}}}는 {}겹째입니다 (최대 {MAX_LOOP_DEPTH}겹)", MAX_LOOP_DEPTH + 1)
@@ -273,6 +275,8 @@ pub(super) struct Engine {
     bytes: usize,
     cap: usize,
     edits: usize,
+    /// 지금까지 쓴 채우기 작업량(`MAX_EDIT_WORK` 기준)
+    edit_work: u64,
     changed: bool,
     allocator: Option<Allocator>,
     filled: BTreeSet<String>,
@@ -283,7 +287,7 @@ pub(super) struct Engine {
 
 fn empty_scope() -> &'static JVal {
     static EMPTY: std::sync::OnceLock<JVal> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| JVal::Object(Vec::new()))
+    EMPTY.get_or_init(JVal::empty_object)
 }
 
 /// 현재 항목 -> 바깥 순서로 찾는다. 점 표기는 없다(`.`은 현재 항목 자신).
@@ -305,15 +309,7 @@ fn as_text(v: Option<&JVal>) -> String {
         None | Some(JVal::Null) => String::new(),
         Some(JVal::String(s)) => s.clone(),
         Some(JVal::Bool(b)) => b.to_string(),
-        Some(JVal::Number(n)) => {
-            // JS의 String(숫자)처럼: 정수로 떨어지는 실수는 소수점 없이
-            if let Some(f) = n.as_f64() {
-                if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 1e21 {
-                    return format!("{}", f as i128);
-                }
-            }
-            n.to_string()
-        }
+        Some(JVal::Number(n)) => super::tag_json::js_number(n),
         Some(v) => v.to_string(),
     }
 }
@@ -542,6 +538,7 @@ impl Engine {
             bytes: limits.max_clone_bytes,
             cap: limits.max_clone_bytes,
             edits: 0,
+            edit_work: 0,
             changed: false,
             allocator,
             filled: BTreeSet::new(),
@@ -896,9 +893,8 @@ impl Engine {
         let mut ranges: Vec<(Ev, Ev)> = Vec::new();
         let mut last_close: isize = -1;
         for (open, close) in pairs {
-            let message = if sc.stack.len() >= MAX_LOOP_DEPTH {
-                Some(too_deep(&open.name))
-            } else if open.unit == close.unit {
+            // 깊이 검사는 다른 거절 검사 뒤에 둔다(HWPX와 같은 우선순위)
+            let message = if open.unit == close.unit {
                 Some(format!(
                     "한 문단 안에서 열고 닫는 반복은 지원하지 않습니다: {{{{loop {}}}}}와 {{{{endloop}}}}를 서로 다른 문단에 두세요",
                     open.name
@@ -908,6 +904,8 @@ impl Engine {
                     "한 문단에서 반복이 끝나고 다음 반복이 시작될 수 없습니다: {{{{loop {}}}}}는 앞 반복의 {{{{endloop}}}}와 다른 문단에 두세요",
                     open.name
                 ))
+            } else if sc.stack.len() >= MAX_LOOP_DEPTH {
+                Some(too_deep(&open.name))
             } else {
                 None
             };
@@ -971,16 +969,16 @@ impl Engine {
 
     fn expand_paras<'d>(
         &mut self,
-        tpl: &[Paragraph],
+        tpl: &mut [Paragraph],
         open: &Ev,
         close: &Ev,
         sc: &Sc<'d>,
         out: &mut Vec<Paragraph>,
     ) -> Res<()> {
-        let slice = &tpl[open.unit..=close.unit];
+        let range = open.unit..=close.unit;
         let site = self.site_of(&tpl[open.unit], open.tag.start, &open.tag.text);
         self.record(key_path(&sc.stack, &open.name), site);
-        if has_section_def(slice) {
+        if has_section_def(&tpl[range.clone()]) {
             let site = self.site_of(&tpl[open.unit], open.tag.start, &open.tag.text);
             self.report(
                 format!(
@@ -994,10 +992,20 @@ impl Engine {
             return Ok(());
         }
         let items = self.loop_items(sc, &open.name)?;
-        self.spend_bytes(slice, slice, items.len(), &items)?;
+        self.spend_bytes(
+            &tpl[range.clone()],
+            &tpl[range.clone()],
+            items.len(),
+            &items,
+        )?;
         for item in &items {
-            self.spend(slice)?;
-            let mut clones: Vec<Paragraph> = slice.to_vec();
+            self.spend(&tpl[range.clone()])?;
+            // 키·위치만 모으는 단계(항목 1개)는 원본을 옮겨 쓴다. 복제하면 겹 수 x 몸통 크기만큼 메모리가 쌓이는데 예산에도 안 잡힌다.
+            let mut clones: Vec<Paragraph> = if self.collect {
+                tpl[range.clone()].iter_mut().map(std::mem::take).collect()
+            } else {
+                tpl[range.clone()].to_vec()
+            };
             let last = clones.len() - 1;
             blank(&mut clones[0], &open.tag);
             blank(&mut clones[last], &close.tag);
@@ -1046,6 +1054,14 @@ impl Engine {
                 }
             }
             if !self.collect {
+                self.edit_work = self
+                    .edit_work
+                    .saturating_add((tags.len() as u64).saturating_mul(m.chars.len() as u64));
+                if self.edit_work > MAX_EDIT_WORK {
+                    return Err(TagFillError::Limit(
+                        "문서의 태그 채우기 작업이 너무 큽니다 (한 문단에 태그와 글자가 아주 많은 문서)".into(),
+                    ));
+                }
                 // 뒤에서부터 바꿔야 앞 태그의 위치가 그대로다
                 for t in tags.iter().rev() {
                     let value = if t.kind == TagKind::Key {
@@ -1333,9 +1349,7 @@ impl Engine {
                     r <= r2 && end >= r1 && !(r >= r1 && end <= r2)
                 })
             });
-            let message = if sc.stack.len() >= MAX_LOOP_DEPTH {
-                Some(too_deep(&open.name))
-            } else if r1 as isize <= last_close {
+            let message = if r1 as isize <= last_close {
                 Some(format!(
                     "한 행에서 반복이 겹칩니다: {{{{loop {}}}}}가 앞 반복과 같은 행에 있습니다",
                     open.name
@@ -1345,6 +1359,8 @@ impl Engine {
                     "세로로 병합된 셀이 반복 행에 걸쳐 있어 반복할 수 없습니다: {{{{loop {}}}}}",
                     open.name
                 ))
+            } else if sc.stack.len() >= MAX_LOOP_DEPTH {
+                Some(too_deep(&open.name))
             } else {
                 None
             };
@@ -1382,7 +1398,15 @@ impl Engine {
                 self.site_of(p, open.tag.start, &open.tag.text)
             };
             self.record(key_path(&sc.stack, &open.name), site);
-            let slice: Vec<RowUnit> = rows[open.unit..=close.unit].to_vec();
+            // 키·위치만 모으는 단계(항목 1개)는 원본 행을 옮겨 쓴다(복제하면 겹 수 x 몸통 크기만큼 쌓이고 예산에도 안 잡힌다)
+            let mut slice: Vec<RowUnit> = if self.collect {
+                rows[open.unit..=close.unit]
+                    .iter_mut()
+                    .map(std::mem::take)
+                    .collect()
+            } else {
+                rows[open.unit..=close.unit].to_vec()
+            };
             let items = self.loop_items(sc, &open.name)?;
             if !self.collect {
                 let flat_paras: Vec<Paragraph> = slice
@@ -1402,7 +1426,11 @@ impl Engine {
                     }
                     self.budget = self.budget.checked_sub(n).ok_or_else(|| self.too_many())?;
                 }
-                let mut clones: Vec<RowUnit> = slice.clone();
+                let mut clones: Vec<RowUnit> = if self.collect {
+                    std::mem::take(&mut slice)
+                } else {
+                    slice.clone()
+                };
                 let last = clones.len() - 1;
                 blank(&mut clones[0][open.cell].paragraphs[open.sub], &open.tag);
                 blank(
@@ -1644,7 +1672,8 @@ impl DocumentCore {
             let mut tail = sec.trailing_lists.clone();
             write_back_masters(&mut sd, tail.as_mut(), e).map_err(TagFillError::Document)?;
             let mut controls = Vec::new();
-            for (pi, p) in sec.paragraphs.iter().enumerate() {
+            // 위치는 채운 뒤의 본문 기준이다(문단이 끼어들어도 어긋나지 않게 새 본문에서 찾는다)
+            for (pi, p) in secs[si].iter().enumerate() {
                 for (ci, c) in p.controls.iter().enumerate() {
                     if let Control::SectionDef(csd) = c {
                         let mut csd = csd.clone();
@@ -1748,12 +1777,14 @@ impl DocumentCore {
         sec.trailing_lists = w.tail;
         // 본문 첫 문단의 구역 정의 컨트롤이 저장 때 쓰이는 원본 레코드를 따로 가진다
         for (pi, ci, csd) in w.controls {
-            if let Some(Control::SectionDef(slot)) = sec
+            let slot = sec
                 .paragraphs
                 .get_mut(pi)
-                .and_then(|p| p.controls.get_mut(ci))
-            {
+                .and_then(|p| p.controls.get_mut(ci));
+            if let Some(Control::SectionDef(slot)) = slot {
                 *slot = csd;
+            } else {
+                debug_assert!(false, "구역 정의 컨트롤 위치가 어긋났습니다");
             }
         }
     }

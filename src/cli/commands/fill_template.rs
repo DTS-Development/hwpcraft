@@ -219,7 +219,7 @@ fn run_inner(args: &[String]) -> Result<Value, Failure> {
     let value = if matches!(value, JVal::Object(_)) {
         value
     } else {
-        JVal::Object(Vec::new())
+        JVal::empty_object()
     };
 
     let report = doc.fill_template_tags(&value, limits)?;

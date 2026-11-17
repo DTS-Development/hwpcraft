@@ -921,3 +921,90 @@ fn reflow_after_fill_uses_the_column_width_of_a_multi_column_section() {
     let two = width_of(true);
     assert!(two < one * 6 / 10, "1단 {one}, 2단 {two}");
 }
+
+#[test]
+fn collect_does_not_clone_wide_loop_bodies() {
+    // 32겹 반복 안에 문단이 많아도 키·위치를 모으는 단계가 몸통을 겹마다 복제하지 않는다(예전에는 겹 수 x 몸통 크기만큼 메모리를 썼다)
+    let m = 6000usize;
+    let mut lines: Vec<String> = (0..32).map(|i| format!("{{{{loop l{i}}}}}")).collect();
+    lines.extend((0..m).map(|i| format!("본문 {i} {{{{k}}}}")));
+    lines.extend((0..32).map(|_| "{{endloop}}".to_string()));
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    let t = std::time::Instant::now();
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert!(scan.issues.is_empty(), "{:?}", scan.issues.len());
+    // 키 모양은 두 겹까지만 담는다(HWPX와 같다)
+    assert_eq!(
+        scan.keys.to_json(),
+        r#"{"keys":{"l0":{"itemSchema":{"l1":{}}}}}"#
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn numbers_are_written_like_js() {
+    use super::tag_json::js_number;
+    let n = |s: &str| js_number(&serde_json::from_str::<serde_json::Number>(s).unwrap());
+    assert_eq!(n("0.000001"), "0.000001");
+    assert_eq!(n("1e-7"), "1e-7");
+    assert_eq!(n("1e20"), "100000000000000000000");
+    assert_eq!(n("12345678901234567890"), "12345678901234567000");
+    assert_eq!(n("1e21"), "1e+21");
+    assert_eq!(n("1.5"), "1.5");
+    assert_eq!(n("100.0"), "100");
+    assert_eq!(n("-0.0"), "0");
+    assert_eq!(n("-2.5e-3"), "-0.0025");
+    assert_eq!(n("0.30000000000000004"), "0.30000000000000004");
+    assert_eq!(n("9007199254740993"), "9007199254740992");
+    assert_eq!(n("42"), "42");
+    let obj = JVal::parse(r#"{"a":[0.000001,1.0,1e2]}"#).unwrap();
+    assert_eq!(obj.to_string(), r#"{"a":[0.000001,1,100]}"#);
+}
+
+#[test]
+fn large_objects_look_up_keys_by_index() {
+    let items: Vec<String> = (0..50_000).map(|i| format!(r#""k{i}":{i}"#)).collect();
+    let v = JVal::parse(&format!("{{{}}}", items.join(","))).unwrap();
+    let t = std::time::Instant::now();
+    for i in (0..50_000).step_by(7) {
+        assert!(v.get(&format!("k{i}")).is_some());
+    }
+    assert!(v.get("nope").is_none());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn zz_dbg() {
+    let c = doc(&["{{loop a}}", "x {{k}}", "{{endloop}}", "y {{z}}"]);
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    eprintln!("DBG {}", scan.keys.to_json());
+    let c = doc(&[
+        "{{loop a}}",
+        "{{loop b}}",
+        "x {{k}}",
+        "{{endloop}}",
+        "{{endloop}}",
+    ]);
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    eprintln!("DBG {}", scan.keys.to_json());
+    let c = doc(&[
+        "{{loop a}}",
+        "{{loop b}}",
+        "{{loop c}}",
+        "x {{k}}",
+        "{{endloop}}",
+        "{{endloop}}",
+        "{{endloop}}",
+    ]);
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    eprintln!("DBG {}", scan.keys.to_json());
+}
