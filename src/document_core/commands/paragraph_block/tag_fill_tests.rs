@@ -1008,3 +1008,26 @@ fn zz_dbg() {
     let scan = c.scan_template_tags(TagLimits::default()).unwrap();
     eprintln!("DBG {}", scan.keys.to_json());
 }
+
+#[test]
+fn collect_in_master_page_handles_deep_wide_loops() {
+    // 바탕쪽 안의 32겹 x 넓은 몸통도 같은 키 수집 경로를 지난다: 키와 위치를 찾고 시간·메모리가 폭증하지 않는다
+    let mut lines: Vec<String> = (0..32).map(|i| format!("{{{{loop m{i}}}}}")).collect();
+    lines.extend((0..3000).map(|i| format!("바탕 {i} {{{{k}}}}")));
+    lines.extend((0..32).map(|_| "{{endloop}}".to_string()));
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc_with_masters(&["본문"], &[(false, &refs)]);
+    let t = std::time::Instant::now();
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert!(scan.issues.is_empty(), "{}", scan.issues.len());
+    assert_eq!(
+        scan.keys.to_json(),
+        r#"{"keys":{"m0":{"itemSchema":{"m1":{}}}}}"#
+    );
+    assert!(scan.locations.iter().any(|(k, _)| k == "m0"));
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        t.elapsed()
+    );
+}
