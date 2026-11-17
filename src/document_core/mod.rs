@@ -43,7 +43,7 @@ pub use commands::paragraph_block::{
     ImportResourceCounts, IssueKind, ParagraphBlockBudget, ParagraphBlockCopy,
     ParagraphBlockLimits, ParagraphBlockMapping, ParagraphBlockPathStep,
     ParagraphBlockValidationError, RepeatParagraphBlockRequest, RepeatParagraphBlockResult,
-    RepeatTableRowsRequest, RepeatTableRowsResult, TagFillError, TagFillReport, TagIssue, TagKeys,
+    RepeatTableRowsRequest, RepeatTableRowsResult, JVal, TagFillError, TagFillReport, TagIssue, TagKeys,
     TagLimits, TagLocation, TagScan, TemplateBinding, TemplateFillPreview, TemplateFillRequest,
     TemplateFillTarget, TemplateOperation, TemplateOperationResult, TemplateScope,
     TEMPLATE_REQUEST_MAX_BYTES,

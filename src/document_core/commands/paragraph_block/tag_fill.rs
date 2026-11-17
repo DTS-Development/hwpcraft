@@ -7,6 +7,7 @@
 //!
 //! 먼저 빈 데이터로 한 번 훑어(collect) 문법 오류를 모두 낸 뒤, 데이터를 채운다. 두 번 다 복제본에서 하므로
 //! 실패하면 문서는 그대로다.
+use super::tag_json::JVal;
 use super::tag_master::write_back_masters;
 pub use super::tag_scan::IssueKind;
 use super::tag_scan::{edit_range, is_obj, model, scan, strip_fill, Tag, TagKind, FILL};
@@ -20,7 +21,6 @@ use crate::{
         table::{Cell, Table},
     },
 };
-use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// 반복 하나의 항목 수 상한(복제는 동기 작업이라 호출을 막는다).
@@ -106,10 +106,23 @@ pub enum TagFillError {
 
 type Res<T> = Result<T, TagFillError>;
 
+/// {{loop}} 안에 {{loop}}를 겹칠 수 있는 최대 깊이(HWPX 엔진과 같다). 데이터 없이도 깊이만큼 복제·재귀가 일어나므로 막는다.
+pub(super) const MAX_LOOP_DEPTH: usize = 32;
+
+/// 한 문단 안의 태그 수 상한. 태그마다 문단 글자를 고쳐 쓰므로 비용이 (태그 수 × 문단 길이)로 늘어난다.
+pub(super) const MAX_TAGS_PER_PARAGRAPH: usize = 5000;
+
+fn too_deep(name: &str) -> String {
+    format!("반복을 너무 깊게 겹칠 수 없습니다: {{{{loop {name}}}}}는 {}겹째입니다 (최대 {MAX_LOOP_DEPTH}겹)", MAX_LOOP_DEPTH + 1)
+}
+
 /// 키 목록: 먼저 쓰인 순서를 지킨다. 반복 안의 키는 반복 이름 아래 항목으로 모인다.
 #[derive(Clone, Debug, Default)]
 pub struct TagKeys {
     pub entries: Vec<(String, Vec<String>)>,
+    /// 이름 -> entries 번호, (entries 번호, 하위 이름) 중복 확인(키가 많아도 선형)
+    index: HashMap<String, usize>,
+    subs_seen: HashSet<(usize, String)>,
 }
 
 impl TagKeys {
@@ -117,38 +130,47 @@ impl TagKeys {
         let (Some(top), child) = (path.first(), path.get(1)) else {
             return;
         };
-        let idx = match self.entries.iter().position(|(k, _)| k == top) {
-            Some(i) => i,
+        let idx = match self.index.get(top) {
+            Some(&i) => i,
             None => {
                 self.entries.push((top.clone(), Vec::new()));
+                self.index.insert(top.clone(), self.entries.len() - 1);
                 self.entries.len() - 1
             }
         };
         if let Some(child) = child {
-            let subs = &mut self.entries[idx].1;
-            if !subs.contains(child) {
-                subs.push(child.clone());
+            if self.subs_seen.insert((idx, child.clone())) {
+                self.entries[idx].1.push(child.clone());
             }
         }
     }
 
-    /// `getTemplateKeysJson`와 같은 모양: `{"keys":{"이름":{"itemSchema":{"하위":{}}}}}`.
+    /// `getTemplateKeysJson`와 같은 모양: `{"keys":{"이름":{"itemSchema":{"하위":{}}}}}`. 키는 처음 쓰인 순서다.
     pub fn to_json(&self) -> String {
-        let mut keys = serde_json::Map::new();
-        for (name, subs) in &self.entries {
-            let mut entry = serde_json::Map::new();
-            if !subs.is_empty() {
-                let schema: serde_json::Map<String, Value> = subs
-                    .iter()
-                    .map(|s| (s.clone(), Value::Object(Default::default())))
-                    .collect();
-                entry.insert("itemSchema".into(), Value::Object(schema));
+        let q = |s: &str| serde_json::Value::String(s.to_string()).to_string();
+        let mut out = String::from("{\"keys\":{");
+        for (i, (name, subs)) in self.entries.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
             }
-            keys.insert(name.clone(), Value::Object(entry));
+            out.push_str(&q(name));
+            out.push(':');
+            if subs.is_empty() {
+                out.push_str("{}");
+            } else {
+                out.push_str("{\"itemSchema\":{");
+                for (j, sub) in subs.iter().enumerate() {
+                    if j > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&q(sub));
+                    out.push_str(":{}");
+                }
+                out.push_str("}}");
+            }
         }
-        let mut root = serde_json::Map::new();
-        root.insert("keys".into(), Value::Object(keys));
-        Value::Object(root).to_string()
+        out.push_str("}}");
+        out
     }
 
     /// 키 경로(`이름` 또는 `반복.하위`)를 처음 쓰인 순서로 나열한다.
@@ -195,7 +217,7 @@ struct Ev {
 }
 
 struct Sc<'d> {
-    scopes: Vec<&'d Value>,
+    scopes: Vec<&'d JVal>,
     stack: Vec<String>,
 }
 
@@ -217,6 +239,13 @@ pub(super) struct Pass {
 }
 
 /// 바탕쪽 하나의 복제본과 채운 뒤 바뀌었는가.
+/// 바탕쪽을 되써 본 결과(문서에 옮기기 전)
+struct Written {
+    section_def: crate::model::document::SectionDef,
+    tail: Option<crate::model::section_tail::SectionTail>,
+    controls: Vec<(usize, usize, Box<crate::model::document::SectionDef>)>,
+}
+
 struct MasterRun {
     section: usize,
     index: usize,
@@ -252,33 +281,31 @@ pub(super) struct Engine {
 
 // ---------------------------------------------------------------- 값 읽기
 
-fn empty_scope() -> &'static Value {
-    static EMPTY: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(|| Value::Object(Default::default()))
+fn empty_scope() -> &'static JVal {
+    static EMPTY: std::sync::OnceLock<JVal> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| JVal::Object(Vec::new()))
 }
 
 /// 현재 항목 -> 바깥 순서로 찾는다. 점 표기는 없다(`.`은 현재 항목 자신).
-fn lookup<'d>(scopes: &[&'d Value], tag: &str) -> Option<&'d Value> {
+fn lookup<'d>(scopes: &[&'d JVal], tag: &str) -> Option<&'d JVal> {
     if tag == "." {
         return scopes.last().copied();
     }
     for s in scopes.iter().rev() {
-        if let Value::Object(map) = s {
-            if let Some(v) = map.get(tag) {
-                return Some(v);
-            }
+        if let Some(v) = s.get(tag) {
+            return Some(v);
         }
     }
     None
 }
 
 /// 글자로 쓸 때의 값: 없으면 빈 글자.
-fn as_text(v: Option<&Value>) -> String {
+fn as_text(v: Option<&JVal>) -> String {
     match v {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Number(n)) => {
+        None | Some(JVal::Null) => String::new(),
+        Some(JVal::String(s)) => s.clone(),
+        Some(JVal::Bool(b)) => b.to_string(),
+        Some(JVal::Number(n)) => {
             // JS의 String(숫자)처럼: 정수로 떨어지는 실수는 소수점 없이
             if let Some(f) = n.as_f64() {
                 if !n.is_i64() && !n.is_u64() && f.fract() == 0.0 && f.abs() < 1e21 {
@@ -301,19 +328,19 @@ fn clean_text(s: &str) -> String {
         .collect()
 }
 
-fn truthy(v: &Value) -> bool {
+fn truthy(v: &JVal) -> bool {
     match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
-        Value::String(s) => !s.is_empty(),
+        JVal::Null => false,
+        JVal::Bool(b) => *b,
+        JVal::Number(n) => n.as_f64().is_some_and(|f| f != 0.0 && !f.is_nan()),
+        JVal::String(s) => !s.is_empty(),
         _ => true,
     }
 }
 
-fn to_items<'d>(v: Option<&'d Value>) -> Vec<&'d Value> {
+fn to_items<'d>(v: Option<&'d JVal>) -> Vec<&'d JVal> {
     match v {
-        Some(Value::Array(a)) => a.iter().collect(),
+        Some(JVal::Array(a)) => a.iter().collect(),
         Some(v) if truthy(v) => vec![v],
         _ => Vec::new(),
     }
@@ -786,7 +813,7 @@ impl Engine {
         els: &T,
         paras: &[Paragraph],
         count: usize,
-        items: &[&Value],
+        items: &[&JVal],
     ) -> Res<()> {
         if self.collect || count == 0 {
             return Ok(());
@@ -803,7 +830,7 @@ impl Engine {
         Ok(())
     }
 
-    fn loop_items<'d>(&self, sc: &Sc<'d>, name: &str) -> Res<Vec<&'d Value>> {
+    fn loop_items<'d>(&self, sc: &Sc<'d>, name: &str) -> Res<Vec<&'d JVal>> {
         if self.collect {
             return Ok(vec![empty_scope()]);
         }
@@ -869,7 +896,9 @@ impl Engine {
         let mut ranges: Vec<(Ev, Ev)> = Vec::new();
         let mut last_close: isize = -1;
         for (open, close) in pairs {
-            let message = if open.unit == close.unit {
+            let message = if sc.stack.len() >= MAX_LOOP_DEPTH {
+                Some(too_deep(&open.name))
+            } else if open.unit == close.unit {
                 Some(format!(
                     "한 문단 안에서 열고 닫는 반복은 지원하지 않습니다: {{{{loop {}}}}}와 {{{{endloop}}}}를 서로 다른 문단에 두세요",
                     open.name
@@ -1000,6 +1029,12 @@ impl Engine {
         let has_fill = m.chars.contains(&FILL);
         if m.chars.contains(&'{') || m.chars.contains(&'}') || has_fill {
             let (tags, problems) = scan(&m.chars);
+            if tags.len() > MAX_TAGS_PER_PARAGRAPH {
+                return Err(TagFillError::Limit(format!(
+                    "한 문단 안의 태그가 너무 많습니다: {}개 (최대 {MAX_TAGS_PER_PARAGRAPH}개)",
+                    tags.len()
+                )));
+            }
             for pr in problems {
                 let site = self.site_of(p, pr.start, &pr.text);
                 self.report(pr.message, pr.kind, None, Some(site));
@@ -1016,7 +1051,7 @@ impl Engine {
                     let value = if t.kind == TagKind::Key {
                         let found = lookup(&sc.scopes, &t.name);
                         let label = key_path(&sc.stack, &t.name).join(".");
-                        if matches!(found, None | Some(Value::Null)) {
+                        if matches!(found, None | Some(JVal::Null)) {
                             self.empty.insert(label);
                         } else {
                             self.filled.insert(label);
@@ -1126,7 +1161,29 @@ impl Engine {
 
     /// 문단을 직접 담는 곳(본문·셀·글상자·머리말 등). 반복으로 문단이 늘거나 줄면 목록을 바꿔 끼운다.
     /// 반환: 구조를 바꾸는 반복이 있으면 첫 반복 시작 문단 번호.
+    /// 문단 목록(셀·머리말·글상자·각주·캡션·바탕쪽)을 처리한다. 이런 목록의 문단 수는 파일에 u16으로 적히므로 넘으면 거절한다.
     fn container<'d>(&mut self, paras: &mut Vec<Paragraph>, sc: &Sc<'d>) -> Res<Option<usize>> {
+        let r = self.section_container(paras, sc)?;
+        self.check_list_len(paras.len())?;
+        Ok(r)
+    }
+
+    fn check_list_len(&self, n: usize) -> Res<()> {
+        if n > usize::from(u16::MAX) {
+            return Err(TagFillError::Limit(format!(
+                "한 목록의 문단이 너무 많아집니다: {n}개 (셀·머리말·글상자·바탕쪽 하나에는 최대 {}개)",
+                u16::MAX
+            )));
+        }
+        Ok(())
+    }
+
+    /// 구역 본문처럼 문단 수에 u16 한도가 없는 목록을 처리한다.
+    fn section_container<'d>(
+        &mut self,
+        paras: &mut Vec<Paragraph>,
+        sc: &Sc<'d>,
+    ) -> Res<Option<usize>> {
         let Some((first, proto)) = self.render_paras(paras, sc)? else {
             return Ok(None);
         };
@@ -1276,7 +1333,9 @@ impl Engine {
                     r <= r2 && end >= r1 && !(r >= r1 && end <= r2)
                 })
             });
-            let message = if r1 as isize <= last_close {
+            let message = if sc.stack.len() >= MAX_LOOP_DEPTH {
+                Some(too_deep(&open.name))
+            } else if r1 as isize <= last_close {
                 Some(format!(
                     "한 행에서 반복이 겹칩니다: {{{{loop {}}}}}가 앞 반복과 같은 행에 있습니다",
                     open.name
@@ -1325,13 +1384,14 @@ impl Engine {
             self.record(key_path(&sc.stack, &open.name), site);
             let slice: Vec<RowUnit> = rows[open.unit..=close.unit].to_vec();
             let items = self.loop_items(sc, &open.name)?;
-            let flat_paras: Vec<Paragraph> = slice
-                .iter()
-                .flatten()
-                .flat_map(|c| c.paragraphs.iter().cloned())
-                .collect();
-            self.spend_bytes(&slice, &flat_paras, items.len(), &items)?;
-            drop(flat_paras);
+            if !self.collect {
+                let flat_paras: Vec<Paragraph> = slice
+                    .iter()
+                    .flatten()
+                    .flat_map(|c| c.paragraphs.iter().cloned())
+                    .collect();
+                self.spend_bytes(&slice, &flat_paras, items.len(), &items)?;
+            }
             for item in &items {
                 if !self.collect {
                     let mut n = 0usize;
@@ -1403,33 +1463,33 @@ impl Engine {
     pub(super) fn run_section(
         &mut self,
         paras: &mut Vec<Paragraph>,
-        data: &Value,
+        data: &JVal,
     ) -> Res<Option<usize>> {
         let sc = Sc {
             scopes: vec![data],
             stack: Vec::new(),
         };
-        self.container(paras, &sc)
+        self.section_container(paras, &sc)
     }
 }
 
 /// 항목 하나가 묶음 안 태그로 들어갈 글자 수 추정: 태그 수 × 항목 값(문자열·숫자) 평균 길이. 정확하지 않아도 예산을 넘길 입력을 복제 전에 알아채는 용도다.
-fn value_estimate(items: &[&Value], tags: usize, cap: usize) -> usize {
+fn value_estimate(items: &[&JVal], tags: usize, cap: usize) -> usize {
     if tags == 0 {
         return 0;
     }
     let mut total = 0f64;
     for it in items {
         match it {
-            Value::Object(map) => {
+            JVal::Object(map) => {
                 let (mut sum, mut n) = (0usize, 0usize);
-                for v in map.values() {
+                for (_, v) in map.iter() {
                     match v {
-                        Value::String(s) => {
+                        JVal::String(s) => {
                             sum += s.chars().count();
                             n += 1;
                         }
-                        Value::Number(num) => {
+                        JVal::Number(num) => {
                             sum += num.to_string().len();
                             n += 1;
                         }
@@ -1474,7 +1534,7 @@ pub struct TagFillReport {
 impl DocumentCore {
     /// 구역 본문과 바탕쪽을 복제해 엔진을 돌린다. 문서는 바꾸지 않는다.
     /// HWPX와 같이 본문(구역 순서)을 모두 훑은 뒤 바탕쪽(구역 순서, 구역 안 순서)을 훑는다.
-    fn run_tags(&self, data: &Value, collect: bool, limits: TagLimits) -> Res<Run> {
+    fn run_tags(&self, data: &JVal, collect: bool, limits: TagLimits) -> Res<Run> {
         let allocator = if collect {
             None
         } else {
@@ -1522,6 +1582,7 @@ impl DocumentCore {
             let before = engine.changed;
             engine.changed = false;
             engine.run_section(&mut m.paras, data)?;
+            engine.check_list_len(m.paras.len())?;
             m.changed = engine.changed;
             engine.changed |= before;
         }
@@ -1534,7 +1595,7 @@ impl DocumentCore {
 
     /// 템플릿 키·위치·문법 오류를 모은다. 문서는 바뀌지 않는다.
     pub fn scan_template_tags(&self, limits: TagLimits) -> Res<TagScan> {
-        let pass = self.run_tags(&Value::Null, true, limits)?.pass;
+        let pass = self.run_tags(&JVal::Null, true, limits)?.pass;
         let issues = pass.issues;
         let mut locations: Vec<(String, TagLocation)> = Vec::new();
         for path in pass.keys.paths() {
@@ -1551,8 +1612,8 @@ impl DocumentCore {
 
     /// 데이터로 `{{...}}`를 채운다. 문법 오류·한도 초과면 문서는 그대로 두고 Err.
     /// 쪽 나누기는 하지 않는다. 같은 인스턴스에서 쪽 정보를 읽을 호출자는 `repaginate_if_needed()`를 부른다.
-    pub fn fill_template_tags(&mut self, data: &Value, limits: TagLimits) -> Res<TagFillReport> {
-        let issues = self.run_tags(&Value::Null, true, limits)?.pass.issues;
+    pub fn fill_template_tags(&mut self, data: &JVal, limits: TagLimits) -> Res<TagFillReport> {
+        let issues = self.run_tags(&JVal::Null, true, limits)?.pass.issues;
         if !issues.is_empty() {
             return Err(TagFillError::Syntax(issues));
         }
@@ -1575,19 +1636,31 @@ impl DocumentCore {
         for m in masters.into_iter().filter(|m| m.changed) {
             edits[m.section].insert(m.index, m.paras);
         }
+        // 시험 삼아 되쓴 복제본은 버리지 않고 그대로 문서에 옮긴다(되쓰기를 두 번 하지 않는다)
+        let mut written: Vec<(usize, Written)> = Vec::new();
         for (si, e) in edits.iter().enumerate().filter(|(_, e)| !e.is_empty()) {
             let sec = &self.document.sections[si];
             let mut sd = sec.section_def.clone();
             let mut tail = sec.trailing_lists.clone();
             write_back_masters(&mut sd, tail.as_mut(), e).map_err(TagFillError::Document)?;
-            for p in &sec.paragraphs {
-                for c in &p.controls {
-                    if let Control::SectionDef(sd) = c {
-                        write_back_masters(&mut (**sd).clone(), None, e)
-                            .map_err(TagFillError::Document)?;
+            let mut controls = Vec::new();
+            for (pi, p) in sec.paragraphs.iter().enumerate() {
+                for (ci, c) in p.controls.iter().enumerate() {
+                    if let Control::SectionDef(csd) = c {
+                        let mut csd = csd.clone();
+                        write_back_masters(&mut csd, None, e).map_err(TagFillError::Document)?;
+                        controls.push((pi, ci, csd));
                     }
                 }
             }
+            written.push((
+                si,
+                Written {
+                    section_def: sd,
+                    tail,
+                    controls,
+                },
+            ));
         }
         // 여기부터는 실패하지 않는다: 구역마다 본문을 바꿔 끼우고 줄 배치를 다시 짠다.
         let tail_sealed = crate::model::section_tail::validate_preservation(&self.document).is_ok();
@@ -1600,8 +1673,9 @@ impl DocumentCore {
                 self.document.sections[si].paragraphs = paras;
             }
             self.document.sections[si].raw_stream = None;
-            if !edits[si].is_empty() {
-                self.commit_masters(si, &edits[si]);
+            if let Some(pos) = written.iter().position(|(i, _)| *i == si) {
+                let (_, w) = written.swap_remove(pos);
+                self.commit_masters(si, w);
             }
             touched.push((si, *first));
         }
@@ -1609,14 +1683,40 @@ impl DocumentCore {
             self.document.seal_section_tail_provenance();
         }
         for (si, first) in touched {
-            self.recompose_section(si);
             let mut start = first.unwrap_or(usize::MAX);
             let n = self.document.sections[si].paragraphs.len();
+            // 단 번호 표(pagination 결과)는 채우기 전 문단 번호 기준이다. 문단이 끼어들거나 빠졌으면 믿을 수 없으니 0단으로 짠다.
+            let columns_valid = self.para_column_map.get(si).is_some_and(|m| m.len() == n);
+            // 열 정의는 앞에서부터 한 번만 따라간다(문단마다 구역 앞을 훑으면 문단 수의 제곱이다)
+            let mut column_def = crate::model::page::ColumnDef::default();
+            let mut reflowed = false;
             for pi in 0..n {
                 let p = &self.document.sections[si].paragraphs[pi];
+                for c in &p.controls {
+                    if let Control::ColumnDef(cd) = c {
+                        column_def = cd.clone();
+                    }
+                }
                 if p.line_segs.is_empty() && !p.text.is_empty() {
-                    self.reflow_paragraph(si, pi);
+                    let col = if columns_valid {
+                        self.para_column_map[si][pi] as usize
+                    } else {
+                        0
+                    };
+                    self.reflow_paragraph_in(si, pi, &column_def, col, false);
+                    reflowed = true;
                     start = start.min(pi);
+                }
+            }
+            // 원고지 구역의 구역 줄 간격 맞춤은 구역 전체를 훑으므로 루프가 끝난 뒤 한 번만 한다
+            if reflowed {
+                let document = &mut self.document;
+                if let Some(grid) = document.sections[si].section_def.cell_grid() {
+                    crate::renderer::cell_grid::fit_section_spacing(
+                        &mut document.sections[si].paragraphs,
+                        &document.doc_info.para_shapes,
+                        grid,
+                    );
                 }
             }
             if start < n {
@@ -1641,16 +1741,19 @@ impl DocumentCore {
         })
     }
 
-    /// 바뀐 바탕쪽을 구역 모델·구역 정의 컨트롤·구역 끝 목록에 되쓴다(먼저 복제본에서 확인한 뒤에만 부른다).
-    fn commit_masters(&mut self, si: usize, edits: &HashMap<usize, Vec<Paragraph>>) {
+    /// 되쓴 바탕쪽을 구역 모델·구역 정의 컨트롤·구역 끝 목록에 옮긴다.
+    fn commit_masters(&mut self, si: usize, w: Written) {
         let sec = &mut self.document.sections[si];
-        let _ = write_back_masters(&mut sec.section_def, sec.trailing_lists.as_mut(), edits);
+        sec.section_def = w.section_def;
+        sec.trailing_lists = w.tail;
         // 본문 첫 문단의 구역 정의 컨트롤이 저장 때 쓰이는 원본 레코드를 따로 가진다
-        for p in &mut sec.paragraphs {
-            for c in &mut p.controls {
-                if let Control::SectionDef(sd) = c {
-                    let _ = write_back_masters(sd, None, edits);
-                }
+        for (pi, ci, csd) in w.controls {
+            if let Some(Control::SectionDef(slot)) = sec
+                .paragraphs
+                .get_mut(pi)
+                .and_then(|p| p.controls.get_mut(ci))
+            {
+                *slot = csd;
             }
         }
     }

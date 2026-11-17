@@ -6,6 +6,7 @@ mod owned;
 mod repeat;
 mod rows_geometry;
 mod tag_fill;
+mod tag_json;
 #[cfg(test)]
 mod tag_fill_tests;
 mod tag_master;
@@ -22,6 +23,7 @@ pub use import::{
     ImportParagraphBlockResult, ImportResourceCounts,
 };
 pub use repeat::{ParagraphBlockCopy, ParagraphBlockMapping, RepeatParagraphBlockResult};
+pub use tag_json::JVal;
 pub use tag_fill::{
     IssueKind, Story, TagFillError, TagFillReport, TagIssue, TagKeys, TagLimits, TagLocation,
     TagScan,

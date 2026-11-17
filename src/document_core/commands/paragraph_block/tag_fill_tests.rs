@@ -1,5 +1,6 @@
 //! `{{key}}` 채우기·키 추출 엔진 시험. 문서는 편집 API로 직접 만든다(고객 문서 없음).
 use super::tag_fill::{visit_paras, TagFillError, TagLimits};
+use super::tag_json::JVal;
 use crate::{
     document_core::DocumentCore,
     model::{control::Control, paragraph::Paragraph},
@@ -36,7 +37,7 @@ fn texts(c: &DocumentCore) -> Vec<String> {
 }
 
 fn fill(c: &mut DocumentCore, data: Value) -> Result<super::tag_fill::TagFillReport, TagFillError> {
-    c.fill_template_tags(&data, TagLimits::default())
+    c.fill_template_tags(&JVal::from(&data), TagLimits::default())
 }
 
 /// 표를 만들고 셀 글자를 채운다. 반환: 표가 든 문단 번호.
@@ -326,14 +327,16 @@ fn loop_item_limit_and_clone_budget_reject() {
     };
     let before = texts(&c);
     let e = c
-        .fill_template_tags(&json!({"r": many.clone()}), limits)
+        .fill_template_tags(&JVal::from(&json!({"r": many.clone()})), limits)
         .unwrap_err();
     assert!(matches!(e, TagFillError::Limit(_)));
     let tiny = TagLimits {
         max_clone_bytes: 1024,
         ..TagLimits::default()
     };
-    let e = c.fill_template_tags(&json!({"r": many}), tiny).unwrap_err();
+    let e = c
+        .fill_template_tags(&JVal::from(&json!({"r": many})), tiny)
+        .unwrap_err();
     assert!(matches!(e, TagFillError::Limit(_)));
     assert_eq!(texts(&c), before);
 }
@@ -346,7 +349,7 @@ fn huge_value_is_stopped_by_budget() {
         ..TagLimits::default()
     };
     let e = c
-        .fill_template_tags(&json!({"big": "가".repeat(5000)}), tiny)
+        .fill_template_tags(&JVal::from(&json!({"big": "가".repeat(5000)})), tiny)
         .unwrap_err();
     assert!(matches!(e, TagFillError::Limit(_)));
 }
@@ -753,4 +756,168 @@ fn master_page_with_unmodeled_records_is_rejected_closed_but_other_pages_still_f
             data: vec![1],
         });
     fill(&mut ok, json!({"b": "B"})).unwrap();
+}
+
+// ---- 리뷰 반영: 깊이 상한·키 순서·긴 문단·목록 길이
+
+#[test]
+fn deeply_nested_loops_are_rejected_without_blowing_up() {
+    // 데이터 없이도 깊이만큼 복제·재귀가 일어나던 입력(예전에는 깊이 4000에서 메모리 수 GB·스택 넘침)
+    let depth = 600usize;
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..depth {
+        lines.push(format!("{{{{loop l{i}}}}}"));
+    }
+    lines.push("안쪽".to_string());
+    for _ in 0..depth {
+        lines.push("{{endloop}}".to_string());
+    }
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert!(
+        scan.issues.iter().any(|i| i.message.contains("너무 깊게")),
+        "{:?}",
+        scan.issues.iter().map(|i| &i.message).collect::<Vec<_>>()
+    );
+    let mut c = doc(&refs);
+    let err = fill(&mut c, json!({})).unwrap_err();
+    assert!(matches!(err, TagFillError::Syntax(_)), "{err:?}");
+    // 상한 안(32겹)은 그대로 처리된다
+    let ok = |d: usize| {
+        let mut l: Vec<String> = (0..d).map(|i| format!("{{{{loop l{i}}}}}")).collect();
+        l.push("안쪽".into());
+        l.extend((0..d).map(|_| "{{endloop}}".to_string()));
+        l
+    };
+    let lines = ok(32);
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    assert!(c
+        .scan_template_tags(TagLimits::default())
+        .unwrap()
+        .issues
+        .is_empty());
+    let lines = ok(33);
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    assert!(!c
+        .scan_template_tags(TagLimits::default())
+        .unwrap()
+        .issues
+        .is_empty());
+}
+
+#[test]
+fn keys_json_keeps_first_use_order_and_object_text_keeps_input_order() {
+    let c = doc(&[
+        "{{zeta}} {{alpha}}",
+        "{{loop rows}}",
+        "{{y}} {{b}} {{a}}",
+        "{{endloop}}",
+        "{{mid}}",
+    ]);
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert_eq!(
+        scan.keys.to_json(),
+        r#"{"keys":{"zeta":{},"alpha":{},"rows":{"itemSchema":{"y":{},"b":{},"a":{}}},"mid":{}}}"#
+    );
+    // 객체·배열 값은 입력 순서로 글자가 된다(HWPX의 JSON.stringify와 같다)
+    let mut c = doc(&["{{o}}", "{{arr}}"]);
+    let data = JVal::parse(r#"{"o":{"b":1,"a":[2,{"z":1,"y":"가"}],"b":3},"arr":[{"q":1,"p":2}]}"#)
+        .unwrap();
+    c.fill_template_tags(&data, TagLimits::default()).unwrap();
+    let t = texts(&c);
+    assert!(
+        t.contains(&r#"{"b":3,"a":[2,{"z":1,"y":"가"}]}"#.to_string()),
+        "{t:?}"
+    );
+    assert!(t.contains(&r#"[{"q":1,"p":2}]"#.to_string()), "{t:?}");
+}
+
+#[test]
+fn long_paragraphs_scan_in_linear_time() {
+    // 닫는 기호만 많은 문단·여는 기호가 이어진 문단이 제곱 시간이던 입력
+    for text in [
+        "}} ".repeat(60_000),
+        "{{a".repeat(60_000),
+        "{{a}}".repeat(300),
+    ] {
+        let c = doc(&[&text]);
+        let start = std::time::Instant::now();
+        let _ = c.scan_template_tags(TagLimits::default()).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+}
+
+#[test]
+fn master_page_over_65535_paragraphs_is_rejected_as_limit() {
+    let mut c = doc_with_masters(
+        &["본문"],
+        &[(false, &["{{loop r}}", "x {{v}}", "{{endloop}}"])],
+    );
+    let many: Vec<Value> = (0..66_000).map(|i| json!({"v": i})).collect();
+    let limits = TagLimits {
+        max_loop_items: 70_000,
+        max_paras: 200_000,
+        ..TagLimits::default()
+    };
+    let e = c
+        .fill_template_tags(&JVal::from(&json!({"r": many})), limits)
+        .unwrap_err();
+    assert!(
+        matches!(e, TagFillError::Limit(m) if m.contains("한 목록")),
+        "limit expected"
+    );
+    assert!(master_texts(&c)[0].contains(&"x {{v}}".to_string()));
+}
+
+#[test]
+fn too_many_tags_in_one_paragraph_is_a_limit() {
+    let mut c = doc(&[&"{{a}}".repeat(5001)]);
+    let e = fill(&mut c, json!({"a": "x"})).unwrap_err();
+    assert!(
+        matches!(&e, TagFillError::Limit(m) if m.contains("태그가 너무 많습니다")),
+        "{e:?}"
+    );
+    // 상한 안은 채워진다
+    let mut c = doc(&[&"{{a}}".repeat(300)]);
+    fill(&mut c, json!({"a": "x"})).unwrap();
+    assert!(texts(&c).contains(&"x".repeat(300)));
+}
+
+#[test]
+fn reflow_after_fill_uses_the_column_width_of_a_multi_column_section() {
+    // 같은 문서를 1단·2단으로 만들어 채우면 2단 쪽의 줄 너비가 눈에 띄게 좁아야 한다(구역 앞에서 한 번 따라간 열 정의로 짠다)
+    let width_of = |two_columns: bool| {
+        let mut c = doc(&["{{loop r}}", "{{v}}", "{{endloop}}"]);
+        if two_columns {
+            let cd = crate::model::page::ColumnDef {
+                column_count: 2,
+                same_width: true,
+                ..Default::default()
+            };
+            c.document_mut().sections[0].paragraphs[0]
+                .controls
+                .push(Control::ColumnDef(cd));
+        }
+        // 낡은 단 번호 표(채우기 전 문단 수 기준)가 남아 있어도 길이가 다르면 믿지 않는다
+        c.para_column_map = vec![vec![1; 2]];
+        let long = "가나다라마바사 ".repeat(40);
+        fill(&mut c, json!({"r": [{"v": long}]})).unwrap();
+        let p = c.document().sections[0]
+            .paragraphs
+            .iter()
+            .find(|p| p.text.starts_with("가나다라"))
+            .unwrap();
+        assert!(!p.line_segs.is_empty());
+        p.line_segs[0].segment_width
+    };
+    let one = width_of(false);
+    let two = width_of(true);
+    assert!(two < one * 6 / 10, "1단 {one}, 2단 {two}");
 }

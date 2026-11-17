@@ -2,11 +2,12 @@
 //!
 //! 문법·의미는 dts-craft의 HWPX 구현(`oss-hwpx.ts`)과 같다. 저장 손실 보고가 비어 있지 않으면 산출물을 쓰지 않는다.
 //! 종료 코드: 0 성공, 2 사용법 오류, 1 그 밖의 실패. 실패 종류는 `--json` 봉투의 `code`로 가른다
-//! (`template` 문법 오류, `limit` 한도 초과, `contentLoss` 저장 손실, `protected` 암호·배포용, `load` 열기 실패, `usage`, `io`).
+//! (`template` 문법 오류, `limit` 한도 초과, `contentLoss` 저장 손실, `protected` 암호·배포용, `load` 열기 실패,
+//! `document` 채울 수 없는 문서 구조, `save` 저장 실패, `usage`, `io`).
 
 use std::fs;
 
-use rhwp::document_core::{TagFillError, TagIssue, TagLimits, TagLocation};
+use rhwp::document_core::{JVal, TagFillError, TagIssue, TagLimits, TagLocation};
 use serde_json::{json, Value};
 
 use crate::cli::document_io::{load_document, LoadError};
@@ -70,7 +71,7 @@ impl From<TagFillError> for Failure {
                 )
             },
             TagFillError::Limit(m) => Self::new("limit", m),
-            TagFillError::Document(m) => Self::new("load", m),
+            TagFillError::Document(m) => Self::new("document", m),
         }
     }
 }
@@ -165,10 +166,14 @@ fn run_inner(args: &[String]) -> Result<Value, Failure> {
 
     let bytes =
         fs::read(input).map_err(|e| Failure::new("io", format!("입력을 읽을 수 없습니다: {e}")))?;
-    if rhwp::parser::detect_format(&bytes) == rhwp::parser::FileFormat::Hwpx {
-        return Err(Failure::usage(
-            "HWPX 입력은 지원하지 않습니다 (HWPX는 dts-craft의 HWPX 경로를 쓰세요)",
-        ));
+    match rhwp::parser::detect_format(&bytes) {
+        rhwp::parser::FileFormat::Hwp => {}
+        rhwp::parser::FileFormat::Hwpx => {
+            return Err(Failure::usage(
+                "HWPX 입력은 지원하지 않습니다 (HWPX는 dts-craft의 HWPX 경로를 쓰세요)",
+            ))
+        }
+        _ => return Err(Failure::usage("HWP(5.x) 파일만 채울 수 있습니다")),
     }
     let mut doc = load_document(&bytes).map_err(|e| match e {
         LoadError::NeedPassword => Failure::new("protected", "비밀번호가 필요한 암호 문서입니다"),
@@ -208,17 +213,20 @@ fn run_inner(args: &[String]) -> Result<Value, Failure> {
             .map_err(|e| Failure::new("io", format!("데이터 파일을 읽을 수 없습니다: {e}")))?,
         None => raw.to_string(),
     };
-    let value: Value = serde_json::from_str(&text)
+    let value = JVal::parse(&text)
         .map_err(|e| Failure::usage(format!("--data가 올바른 JSON이 아닙니다: {e}")))?;
-    if !value.is_object() {
-        return Err(Failure::usage("--data는 JSON 객체여야 합니다"));
-    }
+    // 객체가 아닌 데이터는 HWPX와 같이 빈 데이터로 채운다
+    let value = if matches!(value, JVal::Object(_)) {
+        value
+    } else {
+        JVal::Object(Vec::new())
+    };
 
     let report = doc.fill_template_tags(&value, limits)?;
     // 저장 손실이 있으면 산출물을 쓰지 않는다(편집기 저장 거절과 같은 정책).
     let serialized = doc
         .export_hwp_with_adapter_snapshot_with_report()
-        .map_err(|e| Failure::new("load", format!("저장하지 못했습니다: {e}")))?;
+        .map_err(|e| Failure::new("save", format!("저장하지 못했습니다: {e}")))?;
     let (out_bytes, loss) = serialized.into_parts();
     if !loss.is_empty() {
         let mut f = Failure::new(

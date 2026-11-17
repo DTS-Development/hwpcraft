@@ -2002,11 +2002,8 @@ impl DocumentCore {
     /// 지정된 문단의 line_segs를 컬럼 너비 기반으로 재계산한다.
     pub(crate) fn reflow_paragraph(&mut self, section_idx: usize, para_idx: usize) {
         let section = &self.document.sections[section_idx];
-        let page_def = &section.section_def.page_def;
         // 해당 문단에 적용되는 ColumnDef를 찾음 (구역 내 다단↔단일단 전환 지원)
         let column_def = Self::find_column_def_for_paragraph(&section.paragraphs, para_idx);
-        let layout = PageLayoutInfo::from_page_def(page_def, &column_def, self.dpi);
-
         // 페이지네이션 매핑에서 문단의 소속 단 인덱스 조회
         let col_idx = self
             .para_column_map
@@ -2014,6 +2011,22 @@ impl DocumentCore {
             .and_then(|m| m.get(para_idx))
             .copied()
             .unwrap_or(0) as usize;
+        self.reflow_paragraph_in(section_idx, para_idx, &column_def, col_idx, true);
+    }
+
+    /// `reflow_paragraph`의 본체. 열 정의·단 번호를 호출하는 쪽이 정해 준다(문단을 많이 짜는 호출이 매번 구역 앞을 훑지 않게).
+    /// `fit_spacing`이 거짓이면 원고지 구역의 구역 줄 간격 맞춤(구역 전체를 훑는다)은 하지 않으니 호출하는 쪽이 한 번 맞춘다.
+    pub(crate) fn reflow_paragraph_in(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        column_def: &ColumnDef,
+        col_idx: usize,
+        fit_spacing: bool,
+    ) {
+        let section = &self.document.sections[section_idx];
+        let page_def = &section.section_def.page_def;
+        let layout = PageLayoutInfo::from_page_def(page_def, column_def, self.dpi);
         let col_area = layout
             .column_areas
             .get(col_idx)
@@ -2033,14 +2046,25 @@ impl DocumentCore {
         );
         // 원고지 구역: 칸 수로 줄을 다시 나누고, 문단 세로 위치를 셈하는 줄 간격을 격자에 맞춘다.
         let document = &mut self.document;
-        crate::renderer::cell_grid::fit_body_paragraph(
-            &mut document.sections[section_idx],
-            &document.doc_info.para_shapes,
-            para_idx,
-            column_width,
-            &self.styles,
-            self.dpi,
-        );
+        if fit_spacing {
+            crate::renderer::cell_grid::fit_body_paragraph(
+                &mut document.sections[section_idx],
+                &document.doc_info.para_shapes,
+                para_idx,
+                column_width,
+                &self.styles,
+                self.dpi,
+            );
+        } else {
+            crate::renderer::cell_grid::rebreak_body_paragraph(
+                &mut document.sections[section_idx],
+                &document.doc_info.para_shapes,
+                para_idx,
+                column_width,
+                &self.styles,
+                self.dpi,
+            );
+        }
     }
 
     /// 본문 문단을 다시 짠 서식 편집 뒤에 원고지 구역이면 칸 수로 다시 나눈다.

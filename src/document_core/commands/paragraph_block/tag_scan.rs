@@ -87,14 +87,42 @@ fn find_pair(text: &[char], c: char, from: usize) -> Option<usize> {
     None
 }
 
+/// `find_pair`의 되풀이 호출을 선형으로 만드는 기억. 앞에서 찾은 위치가 아직 `from` 뒤에 있으면 다시 훑지 않는다.
+struct PairCache {
+    c: char,
+    /// (찾기 시작한 위치, 찾은 위치)
+    last: Option<(usize, Option<usize>)>,
+}
+
+impl PairCache {
+    fn new(c: char) -> Self {
+        Self { c, last: None }
+    }
+
+    /// `find_pair(text, c, from)`와 같다. `from`은 호출마다 줄지 않아야 한다.
+    fn find(&mut self, text: &[char], from: usize) -> Option<usize> {
+        if let Some((start, found)) = self.last {
+            if start <= from && found.is_none_or(|f| f >= from) {
+                return found;
+            }
+        }
+        let found = find_pair(text, self.c, from);
+        self.last = Some((from, found));
+        found
+    }
+}
+
 /// 문단 글자에서 `{{...}}`를 찾는다. 짝이 안 맞는 구분자는 문제(problems)로 쌓는다.
 pub(super) fn scan(text: &[char]) -> (Vec<Tag>, Vec<Problem>) {
     let mut tags = Vec::new();
     let mut problems = Vec::new();
     let mut i = 0usize;
+    // 문단이 길어도 선형이 되게 다음 `{{`·`}}` 위치를 기억한다
+    let mut opens = PairCache::new('{');
+    let mut closes = PairCache::new('}');
     while i < text.len() {
-        let s = find_pair(text, '{', i);
-        let e = find_pair(text, '}', i);
+        let s = opens.find(text, i);
+        let e = closes.find(text, i);
         if let Some(e) = e {
             if s.is_none_or(|s| e < s) {
                 let from = i.max(e.saturating_sub(20));
@@ -111,7 +139,7 @@ pub(super) fn scan(text: &[char]) -> (Vec<Tag>, Vec<Problem>) {
             }
         }
         let Some(s) = s else { break };
-        let Some(close) = find_pair(text, '}', s + 2) else {
+        let Some(close) = closes.find(text, s + 2) else {
             let t40 = plain_head(&text[s..(s + 40).min(text.len())]);
             problems.push(Problem {
                 message: format!("닫는 기호가 없는 태그입니다: {t40}"),

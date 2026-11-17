@@ -471,6 +471,22 @@ pub(crate) fn fit_body_paragraph(
     let Some(grid) = section.section_def.cell_grid() else {
         return;
     };
+    rebreak_body_paragraph(section, para_shapes, para_idx, column_width_px, styles, dpi);
+    fit_section_spacing(&mut section.paragraphs, para_shapes, grid);
+}
+
+/// `fit_body_paragraph`에서 구역 줄 간격 맞춤을 뺀 앞 절반. 문단을 많이 짠 뒤 구역 줄 간격은 한 번만 맞추려는 호출이 쓴다.
+pub(crate) fn rebreak_body_paragraph(
+    section: &mut crate::model::document::Section,
+    para_shapes: &[crate::model::style::ParaShape],
+    para_idx: usize,
+    column_width_px: f64,
+    styles: &crate::renderer::style_resolver::ResolvedStyleSet,
+    dpi: f64,
+) {
+    let Some(grid) = section.section_def.cell_grid() else {
+        return;
+    };
     if let Some(para) = section.paragraphs.get_mut(para_idx) {
         if let (true, Some(style)) = (
             paragraph_takes_grid(para, para_shapes),
@@ -484,7 +500,6 @@ pub(crate) fn fit_body_paragraph(
             rebreak_paragraph(para, grid, width, indent, styles, dpi);
         }
     }
-    fit_section_spacing(&mut section.paragraphs, para_shapes, grid);
 }
 
 /// 구역 원고지 문단의 저장 줄 간격을 줄 격자 높이에 맞춘다. 한/글은 글자 높이(줄 간격 0)로
