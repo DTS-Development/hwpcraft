@@ -111,6 +111,8 @@ pub(super) const MAX_LOOP_DEPTH: usize = 32;
 
 /// 한 문단 안의 태그 수 상한. 태그마다 문단 글자를 고쳐 쓰므로 비용이 (태그 수 × 문단 길이)로 늘어난다.
 pub(super) const MAX_TAGS_PER_PARAGRAPH: usize = 5000;
+/// 문서 전체의 서로 다른 키 수 상한(HWPX와 같은 값·문구).
+pub(super) const MAX_KEYS: usize = 100_000;
 /// 문서 전체의 채우기 작업량 상한(문단마다 태그 수 x 문단 글자 수의 합). 태그마다 문단 글자를 고쳐 쓰므로 문단당 상한만으로는 전체 시간이 묶이지 않는다.
 pub(super) const MAX_EDIT_WORK: u64 = 2_000_000_000;
 
@@ -656,16 +658,19 @@ impl Engine {
         }
     }
 
-    fn record(&mut self, path: Vec<String>, site: Site) {
-        if !self.collect {
-            return;
-        }
-        if path.is_empty() {
-            return;
+    fn record(&mut self, path: Vec<String>, site: Site) -> Res<()> {
+        if !self.collect || path.is_empty() {
+            return Ok(());
         }
         let k = path.join(".");
         self.keys.add(&path);
+        if self.keys.entries.len() + self.keys.subs_seen.len() > MAX_KEYS {
+            return Err(TagFillError::Limit(format!(
+                "문서의 키가 너무 많습니다 (서로 다른 키는 최대 {MAX_KEYS}개)"
+            )));
+        }
         self.sites.entry(k).or_insert(site);
+        Ok(())
     }
 
     fn report(
@@ -981,7 +986,7 @@ impl Engine {
     ) -> Res<()> {
         let range = open.unit..=close.unit;
         let site = self.site_of(&tpl[open.unit], open.tag.start, &open.tag.text);
-        self.record(key_path(&sc.stack, &open.name), site);
+        self.record(key_path(&sc.stack, &open.name), site)?;
         if has_section_def(&tpl[range.clone()]) {
             let site = self.site_of(&tpl[open.unit], open.tag.start, &open.tag.text);
             self.report(
@@ -1038,19 +1043,31 @@ impl Engine {
         ranges: &[(Ev, Ev)],
         sc: &Sc<'d>,
     ) -> Res<()> {
+        // 뒤집어 두고 끝에서 하나씩 꺼내면 목록을 앞에서부터 한 번만 소비한다(형제 반복이 많아도 선형).
+        // 꺼낸 만큼 절반 아래로 줄면 메모리를 줄여, 겹마다 큰 목록이 남지 않게 한다(총 복사량은 등비급수라 선형).
         let mut rest = std::mem::take(tpl);
-        let mut base = 0usize;
-        for (open, close) in ranges {
-            let tail = rest.split_off(close.unit + 1 - base);
-            let body = rest.split_off(open.unit - base);
-            for mut p in rest {
-                self.render_paragraph(&mut p, sc)?;
+        rest.reverse();
+        let shrink = |rest: &mut Vec<Paragraph>| {
+            if rest.capacity() > 64 && rest.len() < rest.capacity() / 2 {
+                rest.shrink_to_fit();
             }
+        };
+        let mut pos = 0usize;
+        for (open, close) in ranges {
+            while pos < open.unit {
+                let mut p = rest.pop().expect("문단 수가 맞아야 한다");
+                self.render_paragraph(&mut p, sc)?;
+                pos += 1;
+            }
+            let mut body = Vec::with_capacity(close.unit + 1 - open.unit);
+            while pos <= close.unit {
+                body.push(rest.pop().expect("문단 수가 맞아야 한다"));
+                pos += 1;
+            }
+            shrink(&mut rest);
             self.expand_collect(body, open, close, sc)?;
-            rest = tail;
-            base = close.unit + 1;
         }
-        for mut p in rest {
+        while let Some(mut p) = rest.pop() {
             self.render_paragraph(&mut p, sc)?;
         }
         Ok(())
@@ -1065,7 +1082,7 @@ impl Engine {
         sc: &Sc<'d>,
     ) -> Res<()> {
         let site = self.site_of(&body[0], open.tag.start, &open.tag.text);
-        self.record(key_path(&sc.stack, &open.name), site);
+        self.record(key_path(&sc.stack, &open.name), site)?;
         if has_section_def(&body) {
             let site = self.site_of(&body[0], open.tag.start, &open.tag.text);
             self.report(
@@ -1119,7 +1136,7 @@ impl Engine {
             for t in &tags {
                 if t.kind == TagKind::Key {
                     let site = self.site_of(p, t.start, &t.text);
-                    self.record(key_path(&sc.stack, &t.name), site);
+                    self.record(key_path(&sc.stack, &t.name), site)?;
                 }
             }
             if !self.collect {
@@ -1466,7 +1483,7 @@ impl Engine {
                 let p = &rows[open.unit][open.cell].paragraphs[open.sub];
                 self.site_of(p, open.tag.start, &open.tag.text)
             };
-            self.record(key_path(&sc.stack, &open.name), site);
+            self.record(key_path(&sc.stack, &open.name), site)?;
             // 키·위치만 모으는 단계(항목 1개)는 원본 행을 옮겨 쓴다(복제하면 겹 수 x 몸통 크기만큼 쌓이고 예산에도 안 잡힌다)
             let mut slice: Vec<RowUnit> = if self.collect {
                 rows[open.unit..=close.unit]

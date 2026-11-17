@@ -1031,3 +1031,35 @@ fn collect_in_master_page_handles_deep_wide_loops() {
         t.elapsed()
     );
 }
+
+#[test]
+fn many_sibling_loops_collect_in_linear_time() {
+    // 형제 반복이 많아도 키 수집이 제곱으로 늘지 않는다
+    let mut lines: Vec<String> = Vec::new();
+    for i in 0..20_000 {
+        lines.push(format!("{{{{loop s{}}}}}", i % 50));
+        lines.push(format!("행 {i} {{{{k}}}}"));
+        lines.push("{{endloop}}".to_string());
+    }
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    let t = std::time::Instant::now();
+    let scan = c.scan_template_tags(TagLimits::default()).unwrap();
+    assert!(scan.issues.is_empty(), "{}", scan.issues.len());
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        t.elapsed()
+    );
+}
+
+#[test]
+fn too_many_distinct_keys_is_a_limit() {
+    let lines: Vec<String> = (0..100_001).map(|i| format!("{{{{key{i}}}}}")).collect();
+    let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let c = doc(&refs);
+    match c.scan_template_tags(TagLimits::default()) {
+        Err(TagFillError::Limit(m)) => assert!(m.contains("키가 너무 많습니다"), "{m}"),
+        _ => panic!("limit이어야 한다"),
+    }
+}
