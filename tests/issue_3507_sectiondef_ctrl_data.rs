@@ -9,7 +9,7 @@ use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use rhwp::parser::cfb_reader::decompress_stream;
+use rhwp::parser::cfb_reader::decompress_stream_limited;
 use rhwp::parser::{record::Record, tags};
 
 const SAMPLE: &str = "samples/복학원서.hwp";
@@ -57,7 +57,7 @@ fn section0_records(bytes: &[u8]) -> Vec<Record> {
         .expect("BodyText/Section0 열기");
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).expect("Section0 읽기");
-    let section = decompress_stream(&raw).unwrap_or(raw);
+    let section = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
     Record::read_all(&section).expect("Section0 record 파싱")
 }
 

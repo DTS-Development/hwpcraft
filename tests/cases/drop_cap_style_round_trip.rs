@@ -20,7 +20,7 @@ use std::io::{Cursor, Read};
 
 use rhwp::document_core::DocumentCore;
 use rhwp::model::control::Control;
-use rhwp::parser::{cfb_reader::decompress_stream, record::Record, tags};
+use rhwp::parser::{cfb_reader::decompress_stream_limited, record::Record, tags};
 use serde_json::Value;
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -86,7 +86,7 @@ fn drop_cap_ctrl_data(hwp: &[u8]) -> Vec<(u32, u16)> {
         .expect("section stream")
         .read_to_end(&mut raw)
         .unwrap();
-    let section = decompress_stream(&raw).unwrap_or(raw);
+    let section = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
     Record::read_all(&section)
         .expect("records")
         .iter()

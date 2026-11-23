@@ -86,6 +86,17 @@ struct Hwp5DocumentOpenDecompressionLimits {
     max_stream_input_bytes: usize,
     max_stream_output_bytes: usize,
     max_total_output_bytes: usize,
+    /// DocInfo 레코드 수 상한 (#77). 실문서 최대 3,938의 약 50배.
+    max_doc_info_records: usize,
+    /// 구역(BodyText 스트림) 하나의 레코드 수 상한. 실문서 최대 212,442의 약 9배.
+    max_section_records: usize,
+    /// DocInfo + 전 구역 합계 레코드 수 상한.
+    max_total_records: usize,
+    /// `extra_streams`(모델링하지 않는 CFB 스트림) 하나의 원본 크기 상한 (#77).
+    /// 비-BinData 실문서 최대는 약 3.6KiB지만 고아 BinData를 허용하려고 항목 상한과 같게 둔다.
+    max_extra_stream_bytes: usize,
+    /// `extra_streams` 합계 상한. 풀기 합계 상한과 같다.
+    max_extra_total_bytes: usize,
 }
 
 impl Hwp5DocumentOpenDecompressionLimits {
@@ -98,6 +109,13 @@ impl Hwp5DocumentOpenDecompressionLimits {
         max_stream_output_bytes: 256 * 1024 * 1024,
         // 여러 정상 섹션을 허용하되 단일 문서가 상한을 반복하지 못하게 하는 누적 상한.
         max_total_output_bytes: 512 * 1024 * 1024,
+        // 레코드 수는 스트림 바이트와 별개로 메모리를 부풀린다(0 채움 스트림은 4바이트가
+        // 32바이트 `Record`가 되고, 정상 구조는 레코드당 약 440B, 글자 모양은 약 3KB).
+        max_doc_info_records: 200_000,
+        max_section_records: 2_000_000,
+        max_total_records: 4_000_000,
+        max_extra_stream_bytes: 256 * 1024 * 1024,
+        max_extra_total_bytes: 512 * 1024 * 1024,
     };
 }
 
@@ -177,6 +195,9 @@ struct Hwp5DocumentOpenDecompressionBudget {
     remaining: usize,
     max_stream_input_bytes: usize,
     max_stream_output_bytes: usize,
+    remaining_records: usize,
+    max_doc_info_records: usize,
+    max_section_records: usize,
 }
 
 impl Hwp5DocumentOpenDecompressionBudget {
@@ -185,6 +206,34 @@ impl Hwp5DocumentOpenDecompressionBudget {
             remaining: limits.max_total_output_bytes,
             max_stream_input_bytes: limits.max_stream_input_bytes,
             max_stream_output_bytes: limits.max_stream_output_bytes,
+            remaining_records: limits.max_total_records,
+            max_doc_info_records: limits.max_doc_info_records,
+            max_section_records: limits.max_section_records,
+        }
+    }
+
+    /// DocInfo 스트림의 레코드 수를 레코드를 만들기 전에 센다. 초과하면 열기에 실패한다.
+    fn check_doc_info_records(&mut self, data: &[u8]) -> Result<(), cfb_reader::CfbError> {
+        self.check_records(data, self.max_doc_info_records)
+    }
+
+    /// 구역 스트림의 레코드 수를 레코드를 만들기 전에 센다. 초과하면 열기에 실패한다.
+    fn check_section_records(&mut self, data: &[u8]) -> Result<(), cfb_reader::CfbError> {
+        self.check_records(data, self.max_section_records)
+    }
+
+    fn check_records(
+        &mut self,
+        data: &[u8],
+        stream_max: usize,
+    ) -> Result<(), cfb_reader::CfbError> {
+        let limit = stream_max.min(self.remaining_records);
+        match record::Record::count_limited(data, limit) {
+            Some(count) => {
+                self.remaining_records -= count;
+                Ok(())
+            }
+            None => Err(cfb_reader::CfbError::RecordLimitExceeded(limit)),
         }
     }
 
@@ -477,6 +526,9 @@ fn parse_hwp_with_cfb(
     decompression_budget
         .consume(doc_info_data.len())
         .map_err(ParseError::CfbError)?;
+    decompression_budget
+        .check_doc_info_records(&doc_info_data)
+        .map_err(ParseError::CfbError)?;
     let (mut doc_info, doc_properties) = parse_doc_info_stream(&doc_info_data, encrypted)?;
     doc_info::apply_v5024_strike_bits(&mut doc_info.char_shapes, &file_header.version);
     if let Ok(bytes) = cfb.read_stream_raw_limited(
@@ -518,7 +570,9 @@ fn parse_hwp_with_cfb(
         &bin_data_content,
         encrypted,
         password,
-    );
+        limits,
+    )
+    .map_err(ParseError::CfbError)?;
 
     // Document 조립
     let model_header = ModelFileHeader {
@@ -890,6 +944,9 @@ fn parse_sections_strict(
             .consume(section_data.len())
             .map_err(ParseError::CfbError)?;
 
+        decompression_budget
+            .check_section_records(&section_data)
+            .map_err(ParseError::CfbError)?;
         match parse_visible_section(&section_data, &mut sections, doc_info) {
             Ok(mut section) => {
                 // 원본 BodyText 스트림 보존 (라운드트립용)
@@ -962,6 +1019,9 @@ fn parse_hwp_with_lenient(
     decompression_budget
         .consume(doc_info_data.len())
         .map_err(ParseError::CfbError)?;
+    decompression_budget
+        .check_doc_info_records(&doc_info_data)
+        .map_err(ParseError::CfbError)?;
     let (mut doc_info, doc_properties) = parse_doc_info_stream(&doc_info_data, encrypted)?;
     doc_info::apply_v5024_strike_bits(&mut doc_info.char_shapes, &file_header.version);
     if let Ok(bytes) = lenient.read_stream_raw_limited(
@@ -1029,6 +1089,9 @@ fn parse_hwp_with_lenient(
             .consume(section_data.len())
             .map_err(ParseError::CfbError)?;
 
+        decompression_budget
+            .check_section_records(&section_data)
+            .map_err(ParseError::CfbError)?;
         match parse_visible_section(&section_data, &mut sections, &doc_info) {
             Ok(mut section) => {
                 section.raw_stream = Some(section_data);
@@ -1791,8 +1854,10 @@ fn collect_extra_streams(
     bin_data_content: &[BinDataContent],
     encrypted: bool,
     password: Option<&[u8]>,
-) -> Vec<(String, Vec<u8>)> {
+    limits: Hwp5DocumentOpenDecompressionLimits,
+) -> Result<Vec<(String, Vec<u8>)>, cfb_reader::CfbError> {
     let all_streams = cfb.list_streams();
+    let mut remaining = limits.max_extra_total_bytes;
     let mut extra = Vec::new();
 
     // [Task #1554] 직렬화기(`cfb_writer`)가 `bin_data_content` 로부터 재생성할
@@ -1829,7 +1894,17 @@ fn collect_extra_streams(
         // 비밀번호 암호화 대상 중 모델링하지 않는 스트림은 평문 raw 상태로 보존한다.
         // 직렬화기는 암호화 플래그를 제거하므로 암호문을 그대로 보존하면 Scripts와
         // 고아 BinData가 읽을 수 없는 상태로 저장된다.
-        if let Ok(mut data) = cfb.read_stream_raw(path) {
+        // 상한 없는 읽기였다(#77). 넘으면 건너뛰지 않고 열기에 실패시킨다 — 건너뛰면
+        // 저장할 때 스트림이 조용히 사라진다. 읽기 실패(손상)는 기존대로 무시한다.
+        let stream_limit = limits.max_extra_stream_bytes.min(remaining);
+        let read = match cfb.read_stream_raw_limited(path, stream_limit) {
+            Err(cfb_reader::CfbError::LimitExceeded(max)) => {
+                return Err(cfb_reader::CfbError::LimitExceeded(max))
+            }
+            other => other,
+        };
+        if let Ok(mut data) = read {
+            remaining -= data.len();
             if encrypted && (path.starts_with("/Scripts/") || path.starts_with("/BinData/")) {
                 if let Some(password) = password {
                     data = crypto::decrypt_password_stream(&data, password);
@@ -1839,7 +1914,7 @@ fn collect_extra_streams(
         }
     }
 
-    extra
+    Ok(extra)
 }
 
 /// 직렬화기가 `BinDataContent` 에 대해 생성할 스트림 이름의 (storage_id, ext) 계산.
@@ -2076,7 +2151,11 @@ impl Hwp5BinResolver {
             )
             .ok()
         } else {
-            decompress_plain_bin_data(key, raw.to_vec(), crate::model::bin_data::MAX_BIN_DATA_BYTES)
+            decompress_plain_bin_data(
+                key,
+                raw.to_vec(),
+                crate::model::bin_data::MAX_BIN_DATA_BYTES,
+            )
         }
     }
 }
@@ -2731,6 +2810,7 @@ mod tests {
                 max_stream_input_bytes: 1024,
                 max_stream_output_bytes: 1024,
                 max_total_output_bytes: 1024,
+                ..Hwp5DocumentOpenDecompressionLimits::DEFAULT
             });
         budget.consume(700).unwrap();
         assert_eq!(budget.stream_limit(), 324);
@@ -3242,6 +3322,7 @@ mod tests {
                 max_stream_input_bytes,
                 max_stream_output_bytes,
                 max_total_output_bytes,
+                ..Hwp5DocumentOpenDecompressionLimits::DEFAULT
             },
             ..DocumentOpenDecompressionPolicy::DEFAULT
         }
@@ -4125,5 +4206,231 @@ mod tests {
         // Embedding(is_storage=false)은 그대로
         let img = budget.decode("BIN0003.dat", false, body.clone()).unwrap();
         assert_eq!(&img[..], &body[..]);
+    }
+
+    // ---- #77 레코드 수 상한·extra_streams 상한 ----
+
+    fn record_limit_policy_for_test(
+        doc_info: usize,
+        section: usize,
+        total: usize,
+    ) -> DocumentOpenDecompressionPolicy {
+        DocumentOpenDecompressionPolicy {
+            hwp5: Hwp5DocumentOpenDecompressionLimits {
+                max_doc_info_records: doc_info,
+                max_section_records: section,
+                max_total_records: total,
+                ..Hwp5DocumentOpenDecompressionLimits::DEFAULT
+            },
+            ..DocumentOpenDecompressionPolicy::DEFAULT
+        }
+    }
+
+    /// 샘플의 (DocInfo 레코드 수, 구역별 레코드 수).
+    fn sample_record_counts(data: &[u8]) -> (usize, Vec<usize>) {
+        let mut cfb = cfb_reader::CfbReader::open(data).expect("CFB");
+        let count = |bytes: &[u8]| record::Record::count_limited(bytes, usize::MAX).unwrap();
+        let doc_info = count(&cfb.read_doc_info(true).expect("DocInfo"));
+        let sections = (0..cfb.section_count())
+            .map(|i| count(&cfb.read_body_text_section(i, true, false).expect("구역")))
+            .collect();
+        (doc_info, sections)
+    }
+
+    fn is_record_limit(result: &Result<Document, ParseError>, max: usize) -> bool {
+        matches!(
+            result,
+            Err(ParseError::CfbError(cfb_reader::CfbError::RecordLimitExceeded(m))) if *m == max
+        )
+    }
+
+    #[test]
+    fn record_limit_doc_info_boundary() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let (doc_info, _) = sample_record_counts(&source);
+        let big = usize::MAX / 2;
+        let at = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(doc_info, big, big),
+            || parse_document(&source),
+        );
+        assert!(at.is_ok(), "상한과 같으면 통과해야 한다");
+        let over = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(doc_info - 1, big, big),
+            || parse_document(&source),
+        );
+        assert!(is_record_limit(&over, doc_info - 1), "{over:?}");
+    }
+
+    #[test]
+    fn record_limit_section_boundary_is_fatal_not_empty_section() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let (_, sections) = sample_record_counts(&source);
+        let max = *sections.iter().max().unwrap();
+        let big = usize::MAX / 2;
+        let at = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, max, big),
+            || parse_document(&source),
+        );
+        assert!(at.is_ok(), "상한과 같으면 통과해야 한다");
+        // 1 넘으면 빈 구역으로 삼키지 않고 열기 자체가 실패한다.
+        let over = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, max - 1, big),
+            || parse_document(&source),
+        );
+        assert!(is_record_limit(&over, max - 1), "{over:?}");
+    }
+
+    #[test]
+    fn record_limit_total_boundary() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let (doc_info, sections) = sample_record_counts(&source);
+        let total = doc_info + sections.iter().sum::<usize>();
+        let big = usize::MAX / 2;
+        let at = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, big, total),
+            || parse_document(&source),
+        );
+        assert!(at.is_ok(), "합계가 상한과 같으면 통과해야 한다");
+        let over = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, big, total - 1),
+            || parse_document(&source),
+        );
+        assert!(
+            matches!(
+                over,
+                Err(ParseError::CfbError(
+                    cfb_reader::CfbError::RecordLimitExceeded(_)
+                ))
+            ),
+            "{over:?}"
+        );
+    }
+
+    /// 암호 문서에서도 상한 오류는 WrongPassword 로 바뀌지 않는다.
+    #[test]
+    fn record_limit_error_is_not_wrong_password_for_encrypted_document() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let password = hwp5_raw_doc_info(&source)
+            .into_iter()
+            .take(16)
+            .collect::<Vec<_>>();
+        let (doc_info, sections) = sample_record_counts(&source);
+        let encrypted = encrypt_hwp_streams_for_test(&source, &password);
+        let big = usize::MAX / 2;
+        let ok = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(doc_info, *sections.iter().max().unwrap(), big),
+            || parse_document_with_password(&encrypted, &password),
+        );
+        assert!(ok.is_ok(), "{ok:?}");
+        for policy in [
+            record_limit_policy_for_test(doc_info - 1, big, big),
+            record_limit_policy_for_test(big, *sections.iter().max().unwrap() - 1, big),
+        ] {
+            let result = with_document_open_decompression_policy_for_test(policy, || {
+                parse_document_with_password(&encrypted, &password)
+            });
+            assert!(
+                matches!(
+                    result,
+                    Err(ParseError::CfbError(
+                        cfb_reader::CfbError::RecordLimitExceeded(_)
+                    ))
+                ),
+                "{result:?}"
+            );
+        }
+    }
+
+    /// lenient CFB 경로도 구역 상한 초과를 빈 구역으로 삼키지 않는다.
+    #[test]
+    fn record_limit_lenient_path_is_fatal() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let (_, sections) = sample_record_counts(&source);
+        let max = *sections.iter().max().unwrap();
+        let mutated = force_lenient_cfb_fallback(&source);
+        assert!(
+            cfb_reader::CfbReader::open(&mutated).is_err(),
+            "strict CFB가 거부해야 lenient 경로를 탄다"
+        );
+        let big = usize::MAX / 2;
+        let at = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, max, big),
+            || parse_document(&mutated),
+        );
+        assert!(at.is_ok(), "{at:?}");
+        let over = with_document_open_decompression_policy_for_test(
+            record_limit_policy_for_test(big, max - 1, big),
+            || parse_document(&mutated),
+        );
+        assert!(is_record_limit(&over, max - 1), "{over:?}");
+    }
+
+    fn extra_limit_policy_for_test(stream: usize, total: usize) -> DocumentOpenDecompressionPolicy {
+        DocumentOpenDecompressionPolicy {
+            hwp5: Hwp5DocumentOpenDecompressionLimits {
+                max_extra_stream_bytes: stream,
+                max_extra_total_bytes: total,
+                ..Hwp5DocumentOpenDecompressionLimits::DEFAULT
+            },
+            ..DocumentOpenDecompressionPolicy::DEFAULT
+        }
+    }
+
+    #[test]
+    fn extra_streams_caps_per_stream_and_total_fail_open() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let a = vec![7u8; 1000];
+        let b = vec![9u8; 500];
+        let with_extras = add_raw_streams(
+            &source,
+            &[
+                ("/Scripts/CapA", a.as_slice()),
+                ("/Scripts/CapB", b.as_slice()),
+            ],
+        );
+        let base: usize = parse_document(&source)
+            .unwrap()
+            .extra_streams
+            .iter()
+            .map(|(_, d)| d.len())
+            .sum();
+        let huge = usize::MAX / 2;
+        // 스트림당 상한과 같으면 통과
+        let ok = with_document_open_decompression_policy_for_test(
+            extra_limit_policy_for_test(1000, huge),
+            || parse_document(&with_extras),
+        );
+        let ok = ok.expect("스트림 상한과 같으면 통과");
+        assert_eq!(extra_stream_payload(&ok, "/Scripts/CapA").len(), 1000);
+        // 1 넘으면 건너뛰지 않고 열기 실패
+        let over = with_document_open_decompression_policy_for_test(
+            extra_limit_policy_for_test(999, huge),
+            || parse_document(&with_extras),
+        );
+        assert!(
+            matches!(
+                over,
+                Err(ParseError::CfbError(cfb_reader::CfbError::LimitExceeded(_)))
+            ),
+            "{over:?}"
+        );
+        // 합계: 정확히 같으면 통과, 1 모자라면 실패
+        let total = base + 1500;
+        let ok_total = with_document_open_decompression_policy_for_test(
+            extra_limit_policy_for_test(huge, total),
+            || parse_document(&with_extras),
+        );
+        assert!(ok_total.is_ok(), "{ok_total:?}");
+        let over_total = with_document_open_decompression_policy_for_test(
+            extra_limit_policy_for_test(huge, total - 1),
+            || parse_document(&with_extras),
+        );
+        assert!(
+            matches!(
+                over_total,
+                Err(ParseError::CfbError(cfb_reader::CfbError::LimitExceeded(_)))
+            ),
+            "{over_total:?}"
+        );
     }
 }

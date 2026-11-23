@@ -28,6 +28,10 @@ use serde::Serialize;
 use crate::model::control::Control;
 use crate::model::document::Document;
 use crate::model::paragraph::Paragraph;
+
+/// 차트 XML·중첩 OLE 하나를 읽는 크기 상한. 넘으면 그 차트는 건너뛴다(#69 후속).
+/// 실제 차트는 수십 KiB 수준이라 넉넉한 값이다.
+pub const MAX_CHART_BYTES: usize = 32 * 1024 * 1024;
 use crate::model::shape::{OleShape, ShapeObject};
 use crate::parser::ole_container::parse_ole_container;
 use crate::renderer::layout::find_bin_data_index;
@@ -110,9 +114,13 @@ fn resolve_slots(doc: &Document, ole: &OleShape) -> (Option<usize>, Option<usize
         None => return (zip_part, None),
     };
     let nested_copy = find_bin_data_index(&doc.bin_data_content, nested_id as u16).filter(|&i| {
-        let bytes = doc.bin_data_content[i].data.load();
-        bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0])
-            && parse_ole_container(&bytes).is_some_and(|c| c.has_ooxml_chart())
+        doc.bin_data_content[i]
+            .data
+            .load_limited(MAX_CHART_BYTES)
+            .is_some_and(|bytes| {
+                bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0])
+                    && parse_ole_container(&bytes).is_some_and(|c| c.has_ooxml_chart())
+            })
     });
 
     (zip_part, nested_copy)
@@ -288,14 +296,22 @@ pub fn collect_charts(doc: &Document) -> Vec<ChartRef> {
 /// 확인해, ②의 바이트를 ①에 복제하는 식의 손실 보정을 하지 않아야 한다.
 pub fn zip_chart_xml(doc: &Document, chart: &ChartRef) -> Option<Vec<u8>> {
     let i = chart.zip_part?;
-    let bytes = doc.bin_data_content.get(i)?.data.load();
+    let bytes = doc
+        .bin_data_content
+        .get(i)?
+        .data
+        .load_limited(MAX_CHART_BYTES)?;
     (!bytes.is_empty()).then_some(bytes)
 }
 
 /// ② 중첩 CFB의 `OOXMLChartContents` 에 든 OOXML XML 을 읽는다.
 pub fn nested_chart_xml(doc: &Document, chart: &ChartRef) -> Option<Vec<u8>> {
     let i = chart.nested_copy?;
-    let nested = doc.bin_data_content.get(i)?.data.load();
+    let nested = doc
+        .bin_data_content
+        .get(i)?
+        .data
+        .load_limited(MAX_CHART_BYTES)?;
     parse_ole_container(&nested)?.ooxml_chart
 }
 
@@ -338,5 +354,34 @@ mod tests {
         assert_eq!(find_bin_data_index(&content, 60001), Some(1));
         assert_eq!(find_bin_data_index(&content, 0), None);
         assert_eq!(find_bin_data_index(&content, 9), None);
+    }
+
+    /// 상한(`MAX_CHART_BYTES`)과 같은 크기는 읽고, 1 넘으면 읽지 않는다(#69 후속).
+    #[test]
+    fn chart_reads_are_bounded_by_max_chart_bytes() {
+        let chart = |zip: Option<usize>, nested: Option<usize>| ChartRef {
+            index: 0,
+            section: 0,
+            paragraph: 0,
+            control: 0,
+            container: Vec::new(),
+            zip_part: zip,
+            nested_copy: nested,
+        };
+        let mut doc = Document::default();
+        for (id, len) in [(1u16, MAX_CHART_BYTES), (2, MAX_CHART_BYTES + 1)] {
+            doc.bin_data_content.push(BinDataContent {
+                id,
+                data: vec![1u8; len].into(),
+                extension: "ooxml_chart".to_string(),
+            });
+        }
+        assert_eq!(
+            zip_chart_xml(&doc, &chart(Some(0), None)).map(|v| v.len()),
+            Some(MAX_CHART_BYTES)
+        );
+        assert!(zip_chart_xml(&doc, &chart(Some(1), None)).is_none());
+        // 중첩 사본: 상한 초과는 컨테이너 해석에 닿기 전에 None
+        assert!(nested_chart_xml(&doc, &chart(None, Some(1))).is_none());
     }
 }

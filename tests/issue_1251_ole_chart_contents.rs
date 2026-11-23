@@ -13,7 +13,7 @@ use rhwp::ole_chart::{
     ole_chart_ir_json, parse_ole_chart_contents, probe_ole_chart_contents,
     render_ole_chart_standalone_svg, render_ole_chart_svg_fragment, OleChartType,
 };
-use rhwp::parser::{cfb_reader::decompress_stream, ole_container::parse_ole_container};
+use rhwp::parser::{cfb_reader::decompress_stream_limited, ole_container::parse_ole_container};
 use rhwp::parser::{record::Record, tags};
 
 fn read_fixture() -> Vec<u8> {
@@ -41,7 +41,7 @@ fn read_cfb_stream(bytes: &[u8], path: &str) -> Vec<u8> {
 
 fn section0_records(bytes: &[u8]) -> Vec<Record> {
     let raw = read_cfb_stream(bytes, "/BodyText/Section0");
-    let section = decompress_stream(&raw).unwrap_or(raw);
+    let section = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
     Record::read_all(&section).expect("parse Section0 records")
 }
 
@@ -310,7 +310,7 @@ fn issue_1283_hwpx_to_hwp_save_keeps_ole_as_storage() {
 
     let ole_stream = read_cfb_stream(&hwp, "/BinData/BIN0002.OLE");
     let ole_payload =
-        decompress_stream(&ole_stream).expect("HWP OLE Storage stream must be deflated");
+        decompress_stream_limited(&ole_stream, 256 * 1024 * 1024).expect("HWP OLE Storage stream must be deflated");
     assert_eq!(
         &ole_payload[..4],
         &(content.data.len() as u32).to_le_bytes(),

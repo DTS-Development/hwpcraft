@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::document_core::DocumentCore;
-use crate::parser::cfb_reader::{decompress_stream, CfbReader};
+use crate::parser::cfb_reader::{decompress_stream_limited, CfbReader};
 use crate::parser::parse_document;
 use crate::serializer::hwpx::roundtrip::diff_documents;
 use crate::serializer::serialize_document;
@@ -78,7 +78,7 @@ fn bindata_fingerprint(bytes: &[u8]) -> Option<BTreeMap<u64, usize>> {
             Ok(r) => r,
             Err(_) => continue,
         };
-        let content = decompress_stream(&raw).unwrap_or(raw);
+        let content = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
         let mut h = DefaultHasher::new();
         content.hash(&mut h);
         *multiset.entry(h.finish()).or_insert(0) += 1;
@@ -108,7 +108,7 @@ fn nested_ole_clsid_fingerprint(bytes: &[u8]) -> Option<BTreeMap<[u8; 16], usize
             Ok(r) => r,
             Err(_) => continue,
         };
-        let content = decompress_stream(&raw).unwrap_or(raw);
+        let content = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
         let cfb = if content.starts_with(&CFB_MAGIC) {
             &content[..]
         } else if content.len() > 12 && content[4..12] == CFB_MAGIC {

@@ -325,7 +325,8 @@ pub(super) fn rewrite_hwp(original: &[u8], replacements: &[(String, Vec<u8>)]) -
 
 /// HWP5 `BinData` OLE Storage 스트림에서 중첩 CFB 를 꺼낸다.
 pub(super) fn hwp_nested_cfb(stream: &[u8]) -> Vec<u8> {
-    let inflated = rhwp::parser::cfb_reader::decompress_stream(stream).expect("BinData 압축 해제");
+    let inflated = rhwp::parser::cfb_reader::decompress_stream_limited(stream, 256 * 1024 * 1024)
+        .expect("BinData 압축 해제");
     inflated[4..].to_vec()
 }
 
