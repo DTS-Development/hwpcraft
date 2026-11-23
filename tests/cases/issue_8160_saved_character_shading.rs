@@ -29,7 +29,7 @@ fn char_shape_payloads(bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut cfb = CfbReader::open(bytes).expect("CFB 열기");
     let file_header = cfb.read_file_header().expect("FileHeader 읽기");
     let compressed = file_header.get(36).is_some_and(|b| b & 0x01 != 0);
-    let doc_info = cfb.read_doc_info(compressed).expect("DocInfo 읽기");
+    let doc_info = cfb.read_doc_info_limited(compressed, 256 * 1024 * 1024).expect("DocInfo 읽기");
     Record::read_all(&doc_info)
         .expect("DocInfo record 파싱")
         .into_iter()

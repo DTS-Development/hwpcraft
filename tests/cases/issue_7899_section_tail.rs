@@ -23,7 +23,7 @@ fn section_records(bytes: &[u8], section: usize) -> Vec<RecordTuple> {
     let header = reader.read_file_header().unwrap();
     let compressed = u32::from_le_bytes(header[36..40].try_into().unwrap()) & 1 != 0;
     let stream = reader
-        .read_body_text_section(section as u32, compressed, false)
+        .read_body_text_section_limited(section as u32, compressed, 256 * 1024 * 1024)
         .unwrap();
     let mut cursor = 0;
     let mut records = Vec::new();

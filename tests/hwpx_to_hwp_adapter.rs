@@ -1477,12 +1477,12 @@ fn task903_read_raw_stream(data: &[u8], path: &str) -> Option<Vec<u8>> {
 
 fn task903_read_decompressed_docinfo(data: &[u8], compressed: bool) -> Option<Vec<u8>> {
     let mut cfb = CfbReader::open(data).ok()?;
-    cfb.read_doc_info(compressed).ok()
+    cfb.read_doc_info_limited(compressed, 256 * 1024 * 1024).ok()
 }
 
 fn task903_read_decompressed_section(data: &[u8], index: u32, compressed: bool) -> Option<Vec<u8>> {
     let mut cfb = CfbReader::open(data).ok()?;
-    cfb.read_body_text_section(index, compressed, false).ok()
+    cfb.read_body_text_section_limited(index, compressed, 256 * 1024 * 1024).ok()
 }
 
 fn task903_record_count(data: &[u8]) -> usize {

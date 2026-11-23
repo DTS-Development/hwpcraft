@@ -45,7 +45,7 @@ fn body_records(bytes: &[u8]) -> Vec<Record> {
     let header = cfb.read_stream_raw("/FileHeader").expect("FileHeader");
     let compressed = header[36] & 1 != 0;
     let body = cfb
-        .read_body_text_section(0, compressed, false)
+        .read_body_text_section_limited(0, compressed, 256 * 1024 * 1024)
         .expect("Section0");
     Record::read_all(&body).expect("records")
 }

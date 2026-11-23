@@ -43,7 +43,7 @@ use rhwp::model::bin_data::BinDataType;
 use rhwp::model::control::Control;
 use rhwp::model::document::Document;
 use rhwp::model::shape::{OleShape, ShapeObject};
-use rhwp::parser::cfb_reader::decompress_stream;
+use rhwp::parser::cfb_reader::decompress_stream_limited;
 use rhwp::serializer::hwpx::roundtrip::{diff_documents, strip_hwpx_to_hwp_noise, IrDiff};
 
 /// 코퍼스 하한. `samples/chart` 는 28종이고 `issue_3546_chart_preserved_on_save.rs` 도
@@ -234,7 +234,7 @@ fn issue4099_converted_cfb_has_no_junk_and_ole_ref_resolves() {
 
         // ③ OLE 스트림 바이트 규약 — #3547 축 동승 보호
         let raw = read_cfb_stream(&hwp, "/BinData/BIN0001.OLE");
-        let payload = decompress_stream(&raw).unwrap_or(raw);
+        let payload = decompress_stream_limited(&raw, 256 * 1024 * 1024).unwrap_or(raw);
         assert!(payload.len() > 12, "{label}: OLE 페이로드가 너무 짧다");
         let prefix = u32::from_le_bytes(payload[..4].try_into().unwrap()) as usize;
         assert_eq!(

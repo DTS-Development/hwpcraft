@@ -522,7 +522,15 @@ fn scan_hwp5(data: &[u8], col: &mut Collector) -> (&'static str, Vec<&'static st
                 scan_records_for_overrun("DocInfo", &doc_info, col);
             }
             // DocInfo 를 구조 파싱해 Link BinData 의 원격 참조를 본다(best-effort).
-            if let Ok((di, _)) = crate::parser::doc_info::parse_doc_info(&doc_info) {
+            // 레코드 수가 열기 경로의 DocInfo 상한(20만)을 넘으면 구조 파싱을 건너뛴다(#77).
+            let within_record_cap =
+                crate::parser::record::Record::count_limited(&doc_info, 200_000).is_some();
+            let parsed = if within_record_cap {
+                crate::parser::doc_info::parse_doc_info(&doc_info).ok()
+            } else {
+                None
+            };
+            if let Some((di, _)) = parsed {
                 for bd in &di.bin_data_list {
                     if bd.data_type != crate::model::bin_data::BinDataType::Link {
                         continue;

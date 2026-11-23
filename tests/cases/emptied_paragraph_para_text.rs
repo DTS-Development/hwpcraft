@@ -144,7 +144,7 @@ fn saved_paragraphs(bytes: &[u8]) -> Vec<(u32, Option<Vec<u16>>, Vec<u32>)> {
     let mut cfb = CfbReader::open(bytes).expect("CFB");
     let header = cfb.read_stream_raw("/FileHeader").expect("FileHeader");
     let body = cfb
-        .read_body_text_section(0, header[36] & 1 != 0, false)
+        .read_body_text_section_limited(0, header[36] & 1 != 0, 256 * 1024 * 1024)
         .expect("Section0");
     let mut paragraphs: Vec<(u32, Option<Vec<u16>>, Vec<u32>)> = Vec::new();
     for record in Record::read_all(&body).expect("records") {

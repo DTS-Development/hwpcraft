@@ -30,6 +30,39 @@ impl Record {
         tags::tag_name(self.tag_id)
     }
 
+    /// 레코드를 만들지 않고 헤더만 훑어 개수를 센다. `max`개를 넘으면 `None`.
+    ///
+    /// 할당이 없고 `max + 1`개에서 멈추므로 비용이 상한에 비례한다. 크기가 스트림 끝을
+    /// 넘는 잘린 레코드는 여기서 세지 않고 멈춘다(그 오류는 `read_all`이 보고한다).
+    pub fn count_limited(data: &[u8], max: usize) -> Option<usize> {
+        let mut pos = 0usize;
+        let mut count = 0usize;
+        while data.len() - pos >= 4 {
+            let header =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            let mut size = (header >> 20) as usize;
+            if size == 0xFFF {
+                if data.len() - pos < 4 {
+                    break;
+                }
+                size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+                pos += 4;
+            }
+            // wasm32 에서 pos + size 랩어라운드를 막는다
+            match pos.checked_add(size) {
+                Some(end) if end <= data.len() => pos = end,
+                _ => break,
+            }
+            count += 1;
+            if count > max {
+                return None;
+            }
+        }
+        Some(count)
+    }
+
     /// 바이트 스트림에서 모든 레코드를 파싱
     pub fn read_all(data: &[u8]) -> Result<Vec<Record>, RecordError> {
         let mut cursor = Cursor::new(data);
@@ -232,6 +265,21 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].size, 0);
         assert!(records[0].data.is_empty());
+    }
+
+    #[test]
+    fn count_limited_boundary_and_no_alloc_bomb() {
+        // 4바이트 0 헤더 = 빈 레코드 하나. 상한과 같으면 통과, 하나 넘으면 None.
+        let zeros = vec![0u8; 4 * 10];
+        assert_eq!(Record::count_limited(&zeros, 10), Some(10));
+        assert_eq!(Record::count_limited(&zeros, 9), None);
+        assert_eq!(Record::count_limited(&[], 0), Some(0));
+        // 확장 크기 레코드도 하나로 센다
+        let ext = make_extended_record_bytes(tags::HWPTAG_PARA_TEXT, 0, &[1, 2, 3]);
+        assert_eq!(Record::count_limited(&ext, 1), Some(1));
+        // 잘린 레코드·오버플로 크기는 세지 않고 멈춘다
+        let bad = [0x00u8, 0x00, 0xF0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(Record::count_limited(&bad, 5), Some(0));
     }
 
     #[test]

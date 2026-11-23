@@ -27,6 +27,8 @@ pub enum CfbError {
     DecompressError(String),
     /// 스트림 또는 압축 해제 결과가 호출부 상한을 초과함
     LimitExceeded(usize),
+    /// 레코드 스트림의 레코드 수가 호출부 상한을 초과함 (#77)
+    RecordLimitExceeded(usize),
 }
 
 impl std::fmt::Display for CfbError {
@@ -38,6 +40,9 @@ impl std::fmt::Display for CfbError {
             CfbError::DecompressError(e) => write!(f, "압축 해제 실패: {}", e),
             CfbError::LimitExceeded(limit) => {
                 write!(f, "스트림이 {} 바이트 상한을 초과했습니다", limit)
+            }
+            CfbError::RecordLimitExceeded(limit) => {
+                write!(f, "레코드 수가 {} 개 상한을 초과했습니다", limit)
             }
         }
     }
@@ -116,7 +121,7 @@ impl CfbReader {
     }
 
     /// DocInfo 스트림 읽기 (압축 가능)
-    pub fn read_doc_info(&mut self, compressed: bool) -> Result<Vec<u8>, CfbError> {
+    pub(crate) fn read_doc_info(&mut self, compressed: bool) -> Result<Vec<u8>, CfbError> {
         decode_stream(self.read_stream_raw("/DocInfo")?, compressed)
     }
 
@@ -137,6 +142,9 @@ impl CfbReader {
     ///
     /// 배포용 문서의 경우, 이 함수는 raw 암호화 데이터를 반환한다.
     /// 호출자가 별도로 복호화를 수행해야 한다.
+    ///
+    /// 압축 해제 크기 상한이 **없다**. 믿을 수 없는 입력에는 `read_body_text_section_limited`를
+    /// 쓴다. 배포용(ViewText) 분기 때문에 `pub`으로 남겼고, 비배포 읽기는 limited 쪽을 쓴다.
     pub fn read_body_text_section(
         &mut self,
         index: u32,
@@ -956,7 +964,7 @@ impl LenientCfbReader {
         self.find_entry_id(path).is_some()
     }
 
-    pub fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
+    pub(crate) fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
         decode_stream(self.read_stream("DocInfo")?, compressed)
     }
 
@@ -968,7 +976,7 @@ impl LenientCfbReader {
         decode_stream_limited(self.read_stream("DocInfo")?, compressed, max_bytes)
     }
 
-    pub fn read_body_text_section(
+    pub(crate) fn read_body_text_section(
         &self,
         index: u32,
         compressed: bool,
@@ -987,7 +995,7 @@ impl LenientCfbReader {
     }
 
     /// 본문 섹션 스트림 읽기 (배포용 ViewText 지원)
-    pub fn read_body_text_section_full(
+    pub(crate) fn read_body_text_section_full(
         &self,
         index: u32,
         compressed: bool,
@@ -1132,7 +1140,7 @@ pub fn root_clsid(cfb: &[u8]) -> Option<[u8; 16]> {
 ///
 /// HWP는 raw deflate (wbits=-15) 사용. 실패 시 표준 zlib도 시도.
 /// 문서 입력을 여는 경로는 이 함수 대신 [`decompress_stream_limited`]를 사용한다.
-pub fn decompress_stream(data: &[u8]) -> Result<Vec<u8>, CfbError> {
+pub(crate) fn decompress_stream(data: &[u8]) -> Result<Vec<u8>, CfbError> {
     // raw deflate (wbits=-15) 시도
     use flate2::read::DeflateDecoder;
     let mut decoder = DeflateDecoder::new(data);
