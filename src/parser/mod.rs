@@ -88,7 +88,7 @@ struct Hwp5DocumentOpenDecompressionLimits {
     max_total_output_bytes: usize,
     /// DocInfo 레코드 수 상한 (#77). 실문서 최대 3,938의 약 50배.
     max_doc_info_records: usize,
-    /// 구역(BodyText 스트림) 하나의 레코드 수 상한. 실문서 최대 212,442의 약 9배.
+    /// 구역(BodyText 스트림) 하나의 레코드 수 상한. 실문서 최대 212,442(전 구역 합)의 약 9배.
     max_section_records: usize,
     /// DocInfo + 전 구역 합계 레코드 수 상한.
     max_total_records: usize,
@@ -198,6 +198,7 @@ struct Hwp5DocumentOpenDecompressionBudget {
     remaining_records: usize,
     max_doc_info_records: usize,
     max_section_records: usize,
+    max_total_records: usize,
 }
 
 impl Hwp5DocumentOpenDecompressionBudget {
@@ -209,6 +210,7 @@ impl Hwp5DocumentOpenDecompressionBudget {
             remaining_records: limits.max_total_records,
             max_doc_info_records: limits.max_doc_info_records,
             max_section_records: limits.max_section_records,
+            max_total_records: limits.max_total_records,
         }
     }
 
@@ -233,7 +235,13 @@ impl Hwp5DocumentOpenDecompressionBudget {
                 self.remaining_records -= count;
                 Ok(())
             }
-            None => Err(cfb_reader::CfbError::RecordLimitExceeded(limit)),
+            // 오류에는 걸린 상한 값을 적는다(합계가 걸렸으면 남은 예산이 아니라 합계 상한).
+            None if stream_max <= self.remaining_records => {
+                Err(cfb_reader::CfbError::RecordLimitExceeded(stream_max))
+            }
+            None => Err(cfb_reader::CfbError::RecordLimitExceeded(
+                self.max_total_records,
+            )),
         }
     }
 
@@ -1898,8 +1906,14 @@ fn collect_extra_streams(
         // 저장할 때 스트림이 조용히 사라진다. 읽기 실패(손상)는 기존대로 무시한다.
         let stream_limit = limits.max_extra_stream_bytes.min(remaining);
         let read = match cfb.read_stream_raw_limited(path, stream_limit) {
-            Err(cfb_reader::CfbError::LimitExceeded(max)) => {
-                return Err(cfb_reader::CfbError::LimitExceeded(max))
+            Err(cfb_reader::CfbError::LimitExceeded(_)) => {
+                // 걸린 상한 값을 적는다(합계가 걸렸으면 남은 예산이 아니라 합계 상한).
+                let cap = if limits.max_extra_stream_bytes <= remaining {
+                    limits.max_extra_stream_bytes
+                } else {
+                    limits.max_extra_total_bytes
+                };
+                return Err(cfb_reader::CfbError::LimitExceeded(cap));
             }
             other => other,
         };
@@ -4237,6 +4251,21 @@ mod tests {
         (doc_info, sections)
     }
 
+    /// 훑기 개수는 실제 파싱 개수와 같아야 한다(어긋나면 상한이 틀어진다).
+    #[test]
+    fn count_limited_matches_read_all_on_real_streams() {
+        let source = std::fs::read("samples/2010-01-06.hwp").expect("sample 존재");
+        let mut cfb = cfb_reader::CfbReader::open(&source).expect("CFB");
+        let mut streams = vec![cfb.read_doc_info(true).expect("DocInfo")];
+        for i in 0..cfb.section_count() {
+            streams.push(cfb.read_body_text_section(i, true, false).expect("구역"));
+        }
+        for data in streams {
+            let all = record::Record::read_all(&data).expect("read_all").len();
+            assert_eq!(record::Record::count_limited(&data, usize::MAX), Some(all));
+        }
+    }
+
     fn is_record_limit(result: &Result<Document, ParseError>, max: usize) -> bool {
         matches!(
             result,
@@ -4295,15 +4324,8 @@ mod tests {
             record_limit_policy_for_test(big, big, total - 1),
             || parse_document(&source),
         );
-        assert!(
-            matches!(
-                over,
-                Err(ParseError::CfbError(
-                    cfb_reader::CfbError::RecordLimitExceeded(_)
-                ))
-            ),
-            "{over:?}"
-        );
+        // 오류 숫자는 남은 예산이 아니라 걸린 합계 상한이다.
+        assert!(is_record_limit(&over, total - 1), "{over:?}");
     }
 
     /// 암호 문서에서도 상한 오류는 WrongPassword 로 바뀌지 않는다.

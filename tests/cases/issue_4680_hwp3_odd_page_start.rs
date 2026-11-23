@@ -169,7 +169,7 @@ fn body_ctrl_ids(doc: &rhwp::model::document::Document) -> Vec<Result<String, u3
     let file_header = cfb.read_file_header().expect("FileHeader 읽기");
     let compressed = file_header.get(36).is_some_and(|b| b & 0x01 != 0);
     let section = cfb
-        .read_body_text_section(0, compressed, false)
+        .read_body_text_section_limited(0, compressed, 256 * 1024 * 1024)
         .expect("Section0 읽기");
     Record::read_all(&section)
         .expect("Section0 record 파싱")

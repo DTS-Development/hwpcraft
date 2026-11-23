@@ -28,13 +28,13 @@ use serde::Serialize;
 use crate::model::control::Control;
 use crate::model::document::Document;
 use crate::model::paragraph::Paragraph;
+use crate::model::shape::{OleShape, ShapeObject};
+use crate::parser::ole_container::parse_ole_container;
+use crate::renderer::layout::find_bin_data_index;
 
 /// 차트 XML·중첩 OLE 하나를 읽는 크기 상한. 넘으면 그 차트는 건너뛴다(#69 후속).
 /// 실제 차트는 수십 KiB 수준이라 넉넉한 값이다.
 pub const MAX_CHART_BYTES: usize = 32 * 1024 * 1024;
-use crate::model::shape::{OleShape, ShapeObject};
-use crate::parser::ole_container::parse_ole_container;
-use crate::renderer::layout::find_bin_data_index;
 
 /// 컨테이너 재귀 상한 — `table_extract` 와 같은 값.
 const MAX_NEST_DEPTH: usize = 8;

@@ -121,7 +121,7 @@ impl CfbReader {
     }
 
     /// DocInfo 스트림 읽기 (압축 가능)
-    pub fn read_doc_info(&mut self, compressed: bool) -> Result<Vec<u8>, CfbError> {
+    pub(crate) fn read_doc_info(&mut self, compressed: bool) -> Result<Vec<u8>, CfbError> {
         decode_stream(self.read_stream_raw("/DocInfo")?, compressed)
     }
 
@@ -142,6 +142,9 @@ impl CfbReader {
     ///
     /// 배포용 문서의 경우, 이 함수는 raw 암호화 데이터를 반환한다.
     /// 호출자가 별도로 복호화를 수행해야 한다.
+    ///
+    /// 압축 해제 크기 상한이 **없다**. 믿을 수 없는 입력에는 `read_body_text_section_limited`를
+    /// 쓴다. 배포용(ViewText) 분기 때문에 `pub`으로 남겼고, 비배포 읽기는 limited 쪽을 쓴다.
     pub fn read_body_text_section(
         &mut self,
         index: u32,
@@ -961,7 +964,7 @@ impl LenientCfbReader {
         self.find_entry_id(path).is_some()
     }
 
-    pub fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
+    pub(crate) fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
         decode_stream(self.read_stream("DocInfo")?, compressed)
     }
 
@@ -973,7 +976,7 @@ impl LenientCfbReader {
         decode_stream_limited(self.read_stream("DocInfo")?, compressed, max_bytes)
     }
 
-    pub fn read_body_text_section(
+    pub(crate) fn read_body_text_section(
         &self,
         index: u32,
         compressed: bool,
@@ -992,7 +995,7 @@ impl LenientCfbReader {
     }
 
     /// 본문 섹션 스트림 읽기 (배포용 ViewText 지원)
-    pub fn read_body_text_section_full(
+    pub(crate) fn read_body_text_section_full(
         &self,
         index: u32,
         compressed: bool,

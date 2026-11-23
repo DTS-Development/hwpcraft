@@ -63,7 +63,7 @@ fn depth_and_pairs(bytes: &[u8]) -> Census {
     assert!(cfb.section_count() > 0, "본문 section 없음");
     for index in 0..cfb.section_count() {
         let section = cfb
-            .read_body_text_section(index, compressed, false)
+            .read_body_text_section_limited(index, compressed, 256 * 1024 * 1024)
             .expect("section 읽기");
         let records = Record::read_all(&section).expect("section records 읽기");
         for r in records {

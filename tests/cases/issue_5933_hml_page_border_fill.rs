@@ -37,7 +37,7 @@ fn page_border_fill_records(hwp5: &[u8]) -> usize {
     let header = reader.read_file_header().expect("FileHeader");
     let compressed = header.len() >= 40 && header[36] & 0x01 != 0;
     let section = reader
-        .read_body_text_section(0, compressed, false)
+        .read_body_text_section_limited(0, compressed, 256 * 1024 * 1024)
         .expect("BodyText/Section0");
     Record::read_all(&section)
         .expect("레코드 파싱")
