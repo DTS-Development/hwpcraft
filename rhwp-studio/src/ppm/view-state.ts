@@ -39,11 +39,11 @@ export function isViewReadOnly(): boolean { return current.readOnly; }
 
 /**
  * 읽기 전용에서 허용하는 명령 id. 목록에 없으면 막는다(새 명령은 기본이 막힘).
- * 보기·이동·찾기·복사만 둔다. `link.external` 은 정책 스위치용 가짜 id 라 그대로 둔다(정책이 따로 정한다).
+ * 보기·이동·찾기·복사·인쇄만 둔다. `link.external` 은 정책 스위치용 가짜 id 라 그대로 둔다(정책이 따로 정한다).
  */
 export const READ_ONLY_ALLOWED_IDS: readonly string[] = [
   'edit:copy', 'edit:select-all', 'edit:find', 'edit:find-again', 'edit:goto',
-  'file:about',
+  'file:about', 'file:print', // 인쇄는 문서를 바꾸지 않는다. 허용 여부는 호스트 정책(메뉴 막기)이 따로 정한다
   'link.external',
 ];
 

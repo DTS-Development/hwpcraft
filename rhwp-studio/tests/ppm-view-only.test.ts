@@ -98,7 +98,7 @@ test('읽기 전용 문서는 dirty·save 이벤트가 나가지 않는다', asy
 });
 
 test('읽기 허용 명령: 목록 밖은 막는다', () => {
-  for (const id of ['edit:copy', 'edit:find', 'view:zoom-in', 'view:page-width']) assert.ok(isReadOnlyAllowed(id), id);
+  for (const id of ['edit:copy', 'edit:find', 'file:print', 'view:zoom-in', 'view:page-width']) assert.ok(isReadOnlyAllowed(id), id);
   for (const id of ['edit:paste', 'edit:cut', 'edit:undo', 'edit:delete', 'file:save', 'format:bold', 'insert:table', 'view:form-mode', 'table:merge', 'unknown:new-command']) {
     assert.equal(isReadOnlyAllowed(id), false, id);
   }
