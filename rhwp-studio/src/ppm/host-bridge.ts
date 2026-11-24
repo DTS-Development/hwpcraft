@@ -8,6 +8,7 @@
  */
 import { sanitizeOverrides, type CommandOverrides } from './command-policy.ts';
 import type { GotoOutcome } from './host-goto.ts';
+import { DEFAULT_VIEW_OPTIONS, SUPPORTED_OPEN_OPTIONS, parseViewOptions, type ViewOptions } from './view-state.ts';
 
 export const PREFIX = 'hwpcraft';
 
@@ -51,6 +52,13 @@ export interface HostBridgeDeps {
   addFonts(fonts: FontInput[]): Promise<FontResult>;
   /** 태그 위치로 이동해 선택한다. location 검사는 이 안에서 한다. */
   goto(location: unknown): GotoOutcome;
+  /**
+   * 문서별 보기 옵션(readOnly·chrome·zoomControls)을 입력·명령·화면에 적용한다. 문서를 열기 전에 부른다.
+   * 안 주면 보기 옵션을 쓰지 않는 구성(기본 동작)이다.
+   */
+  applyView?(options: ViewOptions): void;
+  /** 문서 변경 메서드를 막는 최후 방어선. 열기가 끝난 뒤에 켜고, 다음 열기 전에 끈다. */
+  setMutationGuard?(on: boolean): void;
 }
 
 /** 파일 앞머리로 HWP(OLE2)·HWPX(zip)만 통과시킨다. PDF·HML 등은 host 모드에서 거절. */
@@ -122,6 +130,9 @@ export function createHostBridge(deps: HostBridgeDeps) {
   // 부모가 새 문서 기준으로 센 위치를 앞 문서에서 찾지 않도록, 열기가 끝나 성공할 때까지 goto 를 거절한다.
   let docMatchesParent = false;
 
+  // 지금 문서에 적용된 보기 옵션. 열기에 실패하면 편집기가 앞 문서를 되살리므로 옵션도 이 값으로 되돌린다.
+  let view: ViewOptions = DEFAULT_VIEW_OPTIONS;
+
   const fail = (error: string) => deps.post({ type: `${PREFIX}:failed`, error });
 
   async function handleOpen(d: Record<string, unknown>): Promise<void> {
@@ -133,13 +144,25 @@ export function createHostBridge(deps: HostBridgeDeps) {
     if (!openFormat) return fail(failureText('open', 'unsupported-format'));
     const policy = d.policy as { overrides?: unknown } | undefined;
     deps.setOverrides(sanitizeOverrides(policy?.overrides));
+    // 보기 옵션은 문서마다 따로다: 안 준 open 은 기본값으로 덮어쓴다. 입력·명령 차단과 화면은 열기 전에 켜고,
+    // 변경 메서드 방어선은 열기 중 어떤 호출도 실패하지 않도록 열기가 끝난 뒤에 켠다.
+    const prevView = view;
+    const nextView = parseViewOptions(d);
+    deps.setMutationGuard?.(false);
+    view = nextView;
+    deps.applyView?.(nextView);
     try {
       await deps.ready();
       await deps.openDocument(name, bytes);
       opened = { name, format: openFormat };
       docMatchesParent = true;
+      deps.setMutationGuard?.(nextView.readOnly);
     } catch (e) {
       console.error('[hwpcraft] 문서 열기 실패', e);
+      // 앞 문서가 되살아나므로 옵션도 앞 값으로 되돌린다(앞 문서가 없으면 기본값이다).
+      view = prevView;
+      deps.applyView?.(prevView);
+      deps.setMutationGuard?.(prevView.readOnly && opened !== null);
       fail(failureText('open', 'open-failed'));
     }
   }
@@ -224,6 +247,8 @@ export function createHostBridge(deps: HostBridgeDeps) {
   }
 
   async function saveNow(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    // 읽기 전용 문서는 저장 시도가 생기지 않는다(사용자 저장 경로의 최후 방어).
+    if (view.readOnly) return { ok: false, reason: 'read-only' };
     let snap: SaveSnapshot;
     try {
       snap = deps.exportCurrent();
@@ -267,8 +292,13 @@ export function createHostBridge(deps: HostBridgeDeps) {
           break;
       }
     },
-    sendReady(): void { deps.post({ type: `${PREFIX}:ready` }); },
-    sendDirty(dirty: boolean): void { deps.post({ type: `${PREFIX}:dirty`, dirty }); },
+    /** ready 에 지원하는 open 옵션 목록을 싣는다. 옛 빌드는 이 필드가 없어 bridge 가 새 옵션을 거절한다. */
+    sendReady(): void { deps.post({ type: `${PREFIX}:ready`, openOptions: [...SUPPORTED_OPEN_OPTIONS] }); },
+    sendDirty(dirty: boolean): void {
+      // 읽기 전용 문서는 변경 이벤트가 생기지 않는다.
+      if (view.readOnly && dirty) return;
+      deps.post({ type: `${PREFIX}:dirty`, dirty });
+    },
     /** 시작(wasm 초기화) 실패. 원문은 콘솔에만 남긴다. */
     sendInitFailed(e: unknown): void {
       console.error('[hwpcraft] 편집기 시작 실패', e);
@@ -285,6 +315,7 @@ export function createHostBridge(deps: HostBridgeDeps) {
      * 그 밖에는 문서 상태(dirty)를 바꾸지 않는다.
      */
     async sendOutput(file: { name: string; bytes: Uint8Array; format: string }): Promise<void> {
+      if (view.readOnly) return; // 읽기 전용 문서는 save 이벤트가 나가지 않는다.
       const buf = toArrayBuffer(file.bytes);
       deps.post({ type: `${PREFIX}:save`, name: file.name, bytes: buf, format: file.format }, [buf]);
       if (opened && file.name === opened.name && file.format === opened.format) await deps.markSaved(file.name);

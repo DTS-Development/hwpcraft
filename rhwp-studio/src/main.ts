@@ -120,6 +120,7 @@ import { installEmbedRuntime } from '@/embed/runtime';
 import { PPM_HOST } from '@/ppm/host-mode';
 import { LOCKED_COMMAND_IDS as PPM_HOST_LOCKED_FILE_COMMAND_IDS } from '@/ppm/command-policy';
 import { installPpmHost } from '@/ppm/host-install';
+import { isViewReadOnly } from '@/ppm/view-state';
 import { ZOOM_SLIDER_COMMAND as PPM_ZOOM_SLIDER_COMMAND, ZOOM_IN_COMMAND as PPM_ZOOM_IN_COMMAND, ZOOM_OUT_COMMAND as PPM_ZOOM_OUT_COMMAND } from '@/ppm/control-commands';
 import { subscribeFieldChanges } from '@/embed/field-events';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
@@ -282,7 +283,7 @@ function getContext(): EditorContext {
     inTableObjectSelection: inputHandler?.isInTableObjectSelection() ?? false,
     inPictureObjectSelection: inputHandler?.isInPictureObjectSelection() ?? false,
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !isFormMode || canEditFormField,
+    isEditable: !isViewReadOnly() && (!isFormMode || canEditFormField),
     editMode,
     isFormMode,
     canEditFormField,
@@ -789,7 +790,7 @@ async function initialize(): Promise<void> {
     // 막는다: 두 갈래 모두 이 한 함수 안에서, 같은 InputHandler 커밋 원리(executeOperation)
     // 를 거친다.
     ruler.onCommitPin = (commit) => {
-      if (!inputHandler) return;
+      if (!inputHandler || isViewReadOnly()) return;
       if (commit.kind === 'paraProps') {
         inputHandler.applyParaPropsAtCursor(commit.props);
         return;
@@ -1127,6 +1128,7 @@ function setupFileInput(): void {
   container.addEventListener('drop', async (e) => {
     e.preventDefault();
     container.classList.remove('drag-over');
+    if (isViewReadOnly()) return; // 읽기 전용 문서에는 이미지·문서를 끌어 놓아도 아무 일도 없다
     const file = e.dataTransfer?.files[0];
     if (!file) return;
     const dropName = file.name.toLowerCase();
@@ -1319,10 +1321,12 @@ function setupEventListeners(): void {
   });
 
   eventBus.on('document-mutated', (reason) => {
+    if (isViewReadOnly()) return; // 읽기 전용 문서는 변경 표시가 생기지 않는다
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-mutated');
   });
 
   eventBus.on('document-changed', (reason) => {
+    if (isViewReadOnly()) return;
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-changed');
   });
 
@@ -2430,5 +2434,14 @@ if (PPM_HOST) {
     },
     setFontProvider: (provider) => setHostFontProvider(provider),
     setExternalLinkBlocked,
+    onViewChanged: () => { inputHandler?.syncInputReadOnly(); },
+    setMutationGuard: (on) => wasm.setMutationGuard(on),
+    setChrome: (view) => {
+      // chrome:false 면 머리 영역(메뉴·도구 상자·서식 막대)·눈금자·상태 막대를 숨긴다. zoomControls 는 상태 막대에 확대 묶음만 남긴다.
+      setChromeVisibility({ menu: view.chrome, toolbar: view.chrome, statusbar: view.chrome || view.zoomControls });
+      const root = document.getElementById('studio-root');
+      root?.classList.toggle('rhwp-chrome-no-ruler', !view.chrome);
+      root?.classList.toggle('rhwp-view-zoom-only', !view.chrome && view.zoomControls);
+    },
   });
 }

@@ -1,5 +1,6 @@
 import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import { isViewReadOnly } from '@/ppm/view-state';
 // [#2756] 셀 좌표 축 헬퍼는 command.ts 와 단일 정의를 공유한다(축 유도 복제 금지).
 import { cellAxisPath, cellPathForEdit, type FocusedCellCursorGeometry } from './command';
 // 제외 셀 Set 의 키 형식은 조립하는 쪽과 조회하는 쪽이 반드시 같아야 한다 → 단일 정의.
@@ -1899,6 +1900,7 @@ export class CursorState {
    *  글상자 직접 셀 (cellPath.length === 1, 글상자 자체) 은 표가 아니므로 제외.
    */
   enterTableObjectSelection(): boolean {
+    if (isViewReadOnly()) return false; // 읽기 전용: 개체 선택이 없으면 이동·크기·회전 손잡이도 없다
     if (!this.isInCell()) return false;
     const { sectionIndex: sec, parentParaIndex: ppi, controlIndex: ci, cellPath } = this.position;
     if (ppi === undefined || ci === undefined) return false;
@@ -1923,6 +1925,7 @@ export class CursorState {
     sec: number, ppi: number, ci: number,
     cellPath?: CellPathEntry[],
   ): void {
+    if (isViewReadOnly()) return;
     this._tableObjectSelected = true;
     this.selectedTableRef =
       cellPath && cellPath.length > 1 ? { sec, ppi, ci, cellPath } : { sec, ppi, ci };
@@ -2008,6 +2011,7 @@ export class CursorState {
     missing?: boolean,
     pageIndex?: number,
   ): void {
+    if (isViewReadOnly()) return;
     this.exitTableObjectSelection();
     this._pictureObjectSelected = true;
     this.selectedPictureRef = { sec, ppi, ci, type, cellIdx, cellParaIdx, outerTableControlIdx, cellPath, noteRef, headerFooter, missing, pageIndex };

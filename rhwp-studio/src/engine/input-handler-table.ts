@@ -1,4 +1,5 @@
 import { isBodyControl } from './picture-hit-policy';
+import { isViewReadOnly } from '@/ppm/view-state';
 /** input-handler table methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -229,6 +230,7 @@ export function startResizeDrag(this: any,
   pageX: number, pageY: number,
   pageBboxes: CellBbox[],
 ): void {
+  if (isViewReadOnly()) return; // 읽기 전용: 표 경계선 크기 조절 드래그를 시작하지 않는다
   if (!this.cachedTableRef || !this.cachedCellBboxes || !this.tableResizeRenderer) return;
 
   // 경계선 원래 위치 계산

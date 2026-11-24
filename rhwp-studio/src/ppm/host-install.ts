@@ -12,6 +12,7 @@ import { gotoLocation, type GotoHit } from './host-goto.ts';
 import { PpmHostFonts } from './host-fonts.ts';
 import { setHostOutput } from './host-output.ts';
 import { isHostConnected, PPM_HOST_MARKER } from './host-mode.ts';
+import { isReadOnlyAllowed, setViewOptions, type ViewOptions } from './view-state.ts';
 
 interface ReportArtifact { bytes: Uint8Array; contentLoss: { count: number; losses: SaveSnapshot['losses'] } }
 
@@ -40,6 +41,12 @@ export interface HostInstallOptions {
   setFontProvider(provider: PpmHostFonts): void;
   /** 외부 링크 스위치를 편집기 링크 처리에 연결한다. */
   setExternalLinkBlocked(predicate: () => boolean): void;
+  /** 보기 옵션이 바뀐 뒤 편집기 쪽 상태(입력 요소·변경 표시)를 맞춘다. 문서를 열기 전에 불린다. */
+  onViewChanged(options: ViewOptions): void;
+  /** 문서 변경 메서드 방어선을 켜고 끈다(열기가 끝난 뒤에 켠다). */
+  setMutationGuard(on: boolean): void;
+  /** chrome 숨김(메뉴·도구 상자·서식 막대·눈금자·상태 막대, zoomControls 면 확대 묶음만 남김)을 적용한다. */
+  setChrome(view: ViewOptions): void;
 }
 
 /** 부모 없이 열었을 때 안내를 덮어 둔다. */
@@ -64,6 +71,9 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   }
 
   let overrides: CommandOverrides = sanitizeOverrides({});
+  // 문서별 보기 옵션(읽기 전용이면 정책과 별개로 허용 목록 밖의 명령을 막는다).
+  let viewReadOnly = false;
+  const isAllowed = (id: string): boolean => isCommandAllowed(id, overrides) && (!viewReadOnly || isReadOnlyAllowed(id));
   const style = document.createElement('style');
   style.setAttribute('data-ppm-host-policy', '');
   document.head.appendChild(style);
@@ -73,9 +83,9 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   const pruneRules: PruneRules<Element> = {
     leafBlocked: (el) => {
       const cmd = el.getAttribute('data-cmd');
-      if (cmd) return !isCommandAllowed(cmd, overrides);
+      if (cmd) return !isAllowed(cmd);
       const bound = boundControls.get(el);
-      return bound === undefined ? null : !isCommandAllowed(bound, overrides);
+      return bound === undefined ? null : !isAllowed(bound);
     },
     isContainer: (el) => el.matches(CONTAINER_SELECTOR),
     isSeparator: (el) => el.matches(SEPARATOR_SELECTOR),
@@ -90,7 +100,7 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
   // 막힌 명령의 메뉴·도구막대 표면을 숨긴다(실행은 게이트가 따로 막는다).
   const refreshHiddenSurfaces = () => {
     const rules = opts.knownCommandIds()
-      .filter((id) => !isCommandAllowed(id, overrides) && /^[A-Za-z0-9_.:-]+$/.test(id))
+      .filter((id) => !isAllowed(id) && /^[A-Za-z0-9_.:-]+$/.test(id))
       .map((id) => `[data-cmd="${id}"]{display:none!important}`);
     rules.push(`[${HIDE_ATTR}]{display:none!important}`);
     style.textContent = rules.join('\n');
@@ -145,6 +155,14 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
     },
     markSaved: async (name) => { await opts.markSaved(name); },
     addFonts: async (list) => fonts.add(list),
+    applyView: (view) => {
+      viewReadOnly = view.readOnly;
+      setViewOptions(view);
+      opts.setChrome(view);
+      opts.onViewChanged(view);
+      refreshHiddenSurfaces();
+    },
+    setMutationGuard: (on) => opts.setMutationGuard(on),
     goto: (location) => gotoLocation(location, {
       findHits: (text) => opts.wasm.searchAllText(text, true, true),
       // 표가 아닌 컨트롤이면 던진다 — 글상자 일치를 가려내는 데 쓴다.
@@ -157,7 +175,7 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
 
   // 게이트는 isEnabled(메뉴 상태 조회)에서도 불리므로 판정만 한다. 저장은 파일 > 저장이 실제로 실행될 때만 부모로 넘긴다.
   const gate: CommandGate = (id) => {
-    if (!isCommandAllowed(id, overrides)) return 'deny';
+    if (!isAllowed(id)) return 'deny';
     return id === 'file:save' ? 'handled' : 'allow';
   };
   opts.dispatcher.setGate(gate);
