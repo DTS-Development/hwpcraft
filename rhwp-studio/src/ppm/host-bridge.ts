@@ -144,18 +144,22 @@ export function createHostBridge(deps: HostBridgeDeps) {
     if (!openFormat) return fail(failureText('open', 'unsupported-format'));
     const policy = d.policy as { overrides?: unknown } | undefined;
     deps.setOverrides(sanitizeOverrides(policy?.overrides));
-    // 보기 옵션은 문서마다 따로다: 안 준 open 은 기본값으로 덮어쓴다. 입력·명령 차단과 화면은 열기 전에 켜고,
-    // 변경 메서드 방어선은 열기 중 어떤 호출도 실패하지 않도록 열기가 끝난 뒤에 켠다.
+    // 보기 옵션은 문서마다 따로다: 안 준 open 은 기본값으로 덮어쓴다.
+    // 열기를 기다리는 동안은 앞 문서와 새 문서 중 더 엄격한 읽기 전용을 적용해(앞 문서가 읽기 전용이면 그대로 둔다)
+    // 열기 도중 앞 문서가 잠깐 편집 가능해지는 틈을 없앤다. 변경 메서드 방어선은 열기 중 어떤 호출도 실패하지
+    // 않도록 열기 동안 끄고 성공한 뒤에 켠다(입력·명령 차단은 위 적용으로 계속 걸려 있다).
     const prevView = view;
     const nextView = parseViewOptions(d);
     deps.setMutationGuard?.(false);
-    view = nextView;
-    deps.applyView?.(nextView);
+    view = { ...nextView, readOnly: prevView.readOnly || nextView.readOnly };
+    deps.applyView?.(view);
     try {
       await deps.ready();
       await deps.openDocument(name, bytes);
       opened = { name, format: openFormat };
       docMatchesParent = true;
+      view = nextView;
+      deps.applyView?.(view);
       deps.setMutationGuard?.(nextView.readOnly);
     } catch (e) {
       console.error('[hwpcraft] 문서 열기 실패', e);
@@ -180,6 +184,8 @@ export function createHostBridge(deps: HostBridgeDeps) {
     } catch {
       return reject('not-ready');
     }
+    // 읽기 전용 문서는 저장 요청을 거절한다(네 앱 공통). 검사·미리보기는 그대로 답한다.
+    if (purpose === 'save' && view.readOnly) return reject('read-only');
     let snap: SaveSnapshot;
     try {
       snap = deps.exportCurrent();

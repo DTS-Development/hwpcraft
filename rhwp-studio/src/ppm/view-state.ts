@@ -59,8 +59,8 @@ export function isReadOnlyAllowed(id: string): boolean {
 export interface KeyLike { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean }
 
 const NAV_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'Escape']);
-/** Ctrl/Cmd 와 함께 허용하는 글쇠: 복사·모두 선택·찾기·다시 찾기·찾아가기·확대(+/-/0). 한글 두벌식 자모도 같이 둔다. */
-const MOD_ALLOWED = new Set(['c', 'a', 'f', 'l', 'g', '+', '=', '-', '_', '0', 'ㅊ', 'ㅁ', 'ㄹ', 'ㅣ', 'ㅎ']);
+/** Ctrl/Cmd 와 함께 허용하는 글쇠: 복사·모두 선택·찾기·다시 찾기·찾아가기·인쇄(허용 여부는 정책이 정한다)·확대(+/-/0). 한글 두벌식 자모도 같이 둔다. */
+const MOD_ALLOWED = new Set(['c', 'a', 'f', 'l', 'g', 'p', 'ㅔ', '+', '=', '-', '_', '0', 'ㅊ', 'ㅁ', 'ㄹ', 'ㅣ', 'ㅎ']);
 /** Alt 와 함께 허용하는 글쇠: 찾아가기. */
 const ALT_ALLOWED = new Set(['g', 'ㅎ']);
 
@@ -74,7 +74,9 @@ export function isReadOnlyKeyBlocked(e: KeyLike): boolean {
   if (key === 'Backspace' || key === 'Delete' || key === 'Enter' || key === 'Tab') return true;
   if (key === 'Insert') return !(mod && !e.shiftKey); // Ctrl+Insert(복사)만 통과
   if (NAV_KEYS.has(key)) return false;
-  if (mod) return !MOD_ALLOWED.has(key) && !(key === 'Insert');
+  // Ctrl+F1·Ctrl+F2 는 도구 상자 전환(view: 명령, 허용)이라 명령 게이트가 판정하게 둔다.
+  if (mod && (key === 'F1' || key === 'F2')) return false;
+  if (mod) return !MOD_ALLOWED.has(key);
   if (e.altKey) return !ALT_ALLOWED.has(key);
   return false;
 }

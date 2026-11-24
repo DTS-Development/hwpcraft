@@ -3519,7 +3519,6 @@ export class InputHandler {
 
   /** IME 조합 시작 */
   private onCompositionStart(): void {
-    if (isViewReadOnly()) { this.textarea.value = ''; return; }
     _text.onCompositionStart.call(this);
   }
 
@@ -3535,7 +3534,6 @@ export class InputHandler {
 
   /** 텍스트 입력 처리 (textarea input 이벤트) */
   private onInput(e?: Event): void {
-    if (isViewReadOnly()) { this.textarea.value = ''; return; }
     _text.onInput.call(this, e as InputEvent);
   }
 

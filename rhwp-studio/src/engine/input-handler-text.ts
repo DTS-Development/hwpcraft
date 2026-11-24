@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { normalizeTextNewlines } from '../core/text-newlines';
+import { isViewReadOnly } from '@/ppm/view-state';
 import {
   InsertTextCommand,
   DeleteTextCommand,
@@ -376,6 +377,7 @@ function clearCellBlockLetterImeFollowup(this: any): void {
 }
 
 export function onCompositionStart(this: any): void {
+  if (isViewReadOnly()) { this.textarea.value = ''; return; } // PPM 읽기 전용: 조합 입력을 시작하지 않는다
   this.compositionBodyLogical = false;
   if (this._cellBlockLetterImeGuard?.consume('compositionstart')) {
     clearCellBlockLetterImeFollowup.call(this);
@@ -564,6 +566,7 @@ export function getTextAt(this: any, pos: DocumentPosition, count: number): stri
 }
 
 export function onInput(this: any, e?: InputEvent): void {
+  if (isViewReadOnly()) { this.textarea.value = ''; return; } // PPM 읽기 전용: 입력을 버린다
   if (!this.active) return;
 
   if (this._cellBlockLetterImeGuard?.consume('input', this.textarea.value)) {

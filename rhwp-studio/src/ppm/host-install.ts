@@ -99,9 +99,16 @@ export function installPpmHost(opts: HostInstallOptions): boolean {
 
   // 막힌 명령의 메뉴·도구막대 표면을 숨긴다(실행은 게이트가 따로 막는다).
   const refreshHiddenSurfaces = () => {
-    const rules = opts.knownCommandIds()
-      .filter((id) => !isAllowed(id) && /^[A-Za-z0-9_.:-]+$/.test(id))
+    const known = opts.knownCommandIds().filter((id) => /^[A-Za-z0-9_.:-]+$/.test(id));
+    // 정책이 막은 명령은 하나씩 숨긴다. 읽기 전용이면 허용 목록 밖 전부를 규칙 하나로 숨겨(허용 id 만 :not 으로 뺀다)
+    // 막힌 명령 수만큼 규칙을 만들지 않는다.
+    const rules = known
+      .filter((id) => !isCommandAllowed(id, overrides))
       .map((id) => `[data-cmd="${id}"]{display:none!important}`);
+    if (viewReadOnly) {
+      const keep = known.filter((id) => isReadOnlyAllowed(id)).map((id) => `:not([data-cmd="${id}"])`).join('');
+      rules.push(`[data-cmd]${keep}{display:none!important}`);
+    }
     rules.push(`[${HIDE_ATTR}]{display:none!important}`);
     style.textContent = rules.join('\n');
     boundControls = new Map();
