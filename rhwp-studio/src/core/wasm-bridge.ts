@@ -1,4 +1,5 @@
 import { publishPreparedPdf } from './pdf-open';
+import { MUTATING_METHODS } from './mutation-method-registry';
 import { RecoveryCipher } from '../recovery/recovery-crypto';
 import init, { HwpDocument, version } from '@wasm/rhwp.js';
 import { CanvasMetricSession, withPortableMetrics } from './canvas-metric-session';
@@ -788,6 +789,29 @@ export class WasmBridge {
    * 지나므로 여기가 단일 지점이다.
    */
   onBeforeExport: (() => void) | null = null;
+
+  /**
+   * PPM 읽기 전용 최후 방어선. 켜면 문서를 바꾸는 메서드(`MUTATING_METHODS`)가 던진다.
+   * 입력·명령 차단을 빠져나온 경로가 있어도 문서가 바뀌지 않게 하는 안전망이다.
+   * 처음 켤 때 메서드를 한 번 감싸므로 한 번도 켜지 않은 기본 구성은 지금 동작과 같다.
+   */
+  private mutationGuardOn = false;
+  private mutationGuardInstalled = false;
+
+  setMutationGuard(on: boolean): void {
+    this.mutationGuardOn = on;
+    if (!on || this.mutationGuardInstalled) return;
+    this.mutationGuardInstalled = true;
+    const self = this as unknown as Record<string, unknown>;
+    for (const name of MUTATING_METHODS) {
+      const original = self[name];
+      if (typeof original !== 'function') continue;
+      self[name] = (...args: unknown[]) => {
+        if (this.mutationGuardOn) throw new Error(`READ_ONLY: 읽기 전용 문서는 ${name}로 바꿀 수 없습니다`);
+        return (original as (...a: unknown[]) => unknown).apply(this, args);
+      };
+    }
+  }
 
   exportHwp(): Uint8Array {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');

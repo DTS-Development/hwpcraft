@@ -64,6 +64,7 @@ import { CaretLayoutReveal } from './caret-layout-reveal';
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { CellBlockLetterImeGuard } from '@/command/contextual-shortcut';
 import { ImeNavigationGuard } from './ime-navigation-guard';
+import { isViewReadOnly, isReadOnlyKeyBlocked } from '@/ppm/view-state';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DRAG_SCROLL_EDGE_PX = 48;
@@ -841,6 +842,11 @@ export class InputHandler {
   /** 우클릭 컨텍스트 메뉴 처리 */
   private onContextMenu(e: MouseEvent): void {
     _mouse.onContextMenu.call(this, e);
+  }
+
+  /** 보기 옵션이 바뀐 뒤 입력 요소를 맞춘다(읽기 전용이면 입력창이 남긴 글자를 비운다). */
+  syncInputReadOnly(): void {
+    if (isViewReadOnly()) this.textarea.value = '';
   }
 
   /** 더블클릭: 글상자 객체 선택 → 텍스트 편집 진입 */
@@ -2048,6 +2054,7 @@ export class InputHandler {
 
   /** 특수 키 처리 (Backspace, Enter, 화살표, Ctrl+Z/Y) */
   private onKeyDown(e: KeyboardEvent): void {
+    if (isViewReadOnly() && isReadOnlyKeyBlocked(e)) { e.preventDefault(); return; }
     _keyboard.onKeyDown.call(this, e);
   }
 
@@ -2060,6 +2067,7 @@ export class InputHandler {
    */
   handleDocumentNavigationKey(e: KeyboardEvent): void {
     if (!this.active) return;
+    if (isViewReadOnly() && isReadOnlyKeyBlocked(e)) return;
     _keyboard.onKeyDown.call(this, e);
   }
 
@@ -2084,12 +2092,14 @@ export class InputHandler {
 
   /** 잘라내기 이벤트 처리 */
   private onCut(e: ClipboardEvent): void {
+    if (isViewReadOnly()) { e.preventDefault(); return; }
     if (this.dispatcher && !this.dispatcher.isHostAllowed('edit:cut')) { e.preventDefault(); return; }
     _keyboard.onCut.call(this, e);
   }
 
   /** 붙여넣기 이벤트 처리 */
   private onPaste(e: ClipboardEvent): void {
+    if (isViewReadOnly()) { e.preventDefault(); return; }
     if (this.dispatcher && !this.dispatcher.isHostAllowed('edit:paste')) { e.preventDefault(); return; }
     _keyboard.onPaste.call(this, e);
   }
@@ -4916,6 +4926,8 @@ export class InputHandler {
   }
 
   private isOperationAllowedInEditMode(desc: OperationDescriptor): boolean {
+    // PPM 읽기 전용: 이미 적용된 변경을 기록만 하는 record 외에는 모두 막는다(드래그는 시작점에서 따로 막는다).
+    if (isViewReadOnly() && desc.kind !== 'record') return false;
     if (this.editMode !== 'form') return true;
     // [Task #2337-review] kind:'record' 는 이미 적용된 뮤테이션을 히스토리에 기록만 한다.
     // form mode 에서 이를 드롭하면 그 뮤테이션이 undo 불가한 미기록 편집으로 남아(더블클릭
@@ -6368,6 +6380,7 @@ export class InputHandler {
 
   /** 양식 개체 클릭 처리 */
   handleFormObjectClick(formHit: FormObjectHitResult, pageIdx: number, _zoom: number): void {
+    if (isViewReadOnly()) return; // 읽기 전용: 양식 값을 바꾸지 않는다
     if (!formHit.found || formHit.sec === undefined || formHit.para === undefined || formHit.ci === undefined) return;
 
     const { sec, para, ci, formType } = formHit;

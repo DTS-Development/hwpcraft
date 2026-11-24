@@ -1,4 +1,5 @@
 import { isBodyControl } from './picture-hit-policy';
+import { isViewReadOnly } from '@/ppm/view-state';
 /** input-handler keyboard methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -1418,6 +1419,8 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   //  한컴 UX 정합 (`feedback_visual_judgment_authority`).
   if (e.key === 'Escape') {
     e.preventDefault();
+    // 읽기 전용: 개체 선택으로 들어가지 않는다(진입이 막혀 있어 캐럿만 사라지고 선택 이벤트가 거짓으로 나가는 것을 피한다).
+    if (isViewReadOnly()) return;
     const inCell = this.cursor.isInCell();
     const inTextBox = this.cursor.isInTextBox();
     const nestingDepth = this.cursor.nestingDepth();
